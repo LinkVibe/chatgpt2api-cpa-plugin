@@ -1,0 +1,11 @@
+{
+  "id": "chatgpt2api-cpa-plugin",
+  "name": "ChatGPT2API CPA Plugin",
+  "description": "Use ChatGPT access_token accounts in CLIProxyAPI: Sentinel PoW/Turnstile, image gen/edit, text SSE, and a management UI for one-token-per-line bulk import.",
+  "author": "LinkVibe",
+  "version": "0.2.0",
+  "repository": "https://github.com/LinkVibe/chatgpt2api-cpa-plugin",
+  "homepage": "https://github.com/LinkVibe/chatgpt2api-cpa-plugin",
+  "license": "MIT",
+  "tags": ["Provider", "Auth", "Management", "ChatGPT", "Image"]
+}

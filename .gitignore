@@ -1,0 +1,19 @@
+# build
+*.dll
+*.so
+*.dylib
+*.exe
+*.h
+*.a
+dist/
+release/
+*.zip
+
+# go
+/vendor/
+
+# ide
+.idea/
+.vscode/
+*.swp
+.DS_Store
