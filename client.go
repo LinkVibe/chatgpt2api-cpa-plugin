@@ -203,15 +203,14 @@ func (c *chatgptClient) listOfficialModels() ([]map[string]any, error) {
 		if strings.Contains(strings.ToLower(slug), "codex") {
 			continue
 		}
-		pub := "web-" + slug
-		if _, ok := seen[pub]; ok {
+		if _, ok := seen[slug]; ok {
 			continue
 		}
-		seen[pub] = struct{}{}
+		seen[slug] = struct{}{}
 		methods := []string{"chat"}
 		title := strings.ToLower(slug + " " + str(m["title"]) + " " + str(m["description"]))
 		if strings.Contains(title, "image") || strings.Contains(slug, "image") || slug == "auto" {
-			// auto is used for picture_v2; expose image method on web-auto / web image-ish
+			// auto is used for picture_v2; expose image method on auto / image-ish slugs
 			if slug == "auto" || strings.Contains(slug, "image") {
 				methods = []string{"chat", "image"}
 			}
@@ -224,48 +223,38 @@ func (c *chatgptClient) listOfficialModels() ([]map[string]any, error) {
 			created = t
 		}
 		out = append(out, map[string]any{
-			"ID":                         pub,
+			"ID":                         slug,
 			"Object":                     "model",
 			"Created":                    created,
 			"OwnedBy":                    providerID,
-			"DisplayName":                pub + " (chatgpt web)",
+			"DisplayName":                slug + " (chatgpt web)",
 			"Name":                       slug,
 			"SupportedGenerationMethods": methods,
 			"UserDefined":                true,
 		})
 	}
 	// Always ensure image entry for website picture_v2 (official list may not expose gpt-image-2 slug).
-	if _, ok := seen["web-gpt-image-2"]; !ok {
+	if _, ok := seen["gpt-image-2"]; !ok {
 		out = append(out, map[string]any{
-			"ID":                         "web-gpt-image-2",
+			"ID":                         "gpt-image-2",
 			"Object":                     "model",
 			"OwnedBy":                    providerID,
-			"DisplayName":                "web-gpt-image-2 (chatgpt web picture_v2)",
+			"DisplayName":                "gpt-image-2 (chatgpt web picture_v2)",
 			"Name":                       "auto",
 			"SupportedGenerationMethods": []string{"chat", "image"},
 			"UserDefined":                true,
 		})
 	}
-	if _, ok := seen["web-auto"]; !ok {
-		// web-auto may already come from slug "auto"
-		hasAuto := false
-		for _, row := range out {
-			if str(row["ID"]) == "web-auto" {
-				hasAuto = true
-				break
-			}
-		}
-		if !hasAuto {
-			out = append(out, map[string]any{
-				"ID":                         "web-auto",
-				"Object":                     "model",
-				"OwnedBy":                    providerID,
-				"DisplayName":                "web-auto (chatgpt web)",
-				"Name":                       "auto",
-				"SupportedGenerationMethods": []string{"chat", "image"},
-				"UserDefined":                true,
-			})
-		}
+	if _, ok := seen["auto"]; !ok {
+		out = append(out, map[string]any{
+			"ID":                         "auto",
+			"Object":                     "model",
+			"OwnedBy":                    providerID,
+			"DisplayName":                "auto (chatgpt web)",
+			"Name":                       "auto",
+			"SupportedGenerationMethods": []string{"chat", "image"},
+			"UserDefined":                true,
+		})
 	}
 	return out, nil
 }
@@ -986,8 +975,8 @@ func (c *chatgptClient) streamTextConversation(messages []map[string]any, model 
 	if c.accessToken == "" {
 		path = "/backend-anon/conversation"
 	}
-	// Public id is web-*; upstream ChatGPT slug is without web- (image → auto).
-	upstreamModel := stripWebPrefix(model)
+	// Client model id is the upstream slug already; image-gen slug maps to auto.
+	upstreamModel := strings.TrimSpace(model)
 	if upstreamModel == "" || upstreamModel == "gpt-image-2" {
 		upstreamModel = "auto"
 	}
@@ -1107,15 +1096,6 @@ func imageModelSettings(model string) (upstream, effort string) {
 	// Website picture_v2 path always uses upstream model "auto" (matches openai_backend_api).
 	_ = model
 	return "auto", ""
-}
-
-// stripWebPrefix maps public web-* id to upstream ChatGPT model slug for text path.
-func stripWebPrefix(model string) string {
-	m := strings.TrimSpace(model)
-	if len(m) >= 4 && strings.EqualFold(m[:4], "web-") {
-		return m[4:]
-	}
-	return m
 }
 
 func decodeImageBytes(imageStr string) ([]byte, error) {

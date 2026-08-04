@@ -27,7 +27,7 @@ var (
 		ImageSettleEnabled:    true,
 		ImageSettleWaitSecs:   2,
 		DisableInvalidToken:   true,
-		DefaultModel:          "web-gpt-image-2",
+		DefaultModel:          "gpt-image-2",
 	}
 )
 

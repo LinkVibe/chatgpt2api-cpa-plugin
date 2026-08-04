@@ -56,7 +56,8 @@ func handleManagement(request []byte) ([]byte, error) {
 		if method == "POST" && strings.Contains(lowerPath, "/api/import") {
 			body := extractRequestBody(req)
 			var payload struct {
-				Text string `json:"text"`
+				Text   string `json:"text"`
+				Prefix string `json:"prefix"`
 			}
 			_ = json.Unmarshal(body, &payload)
 			if strings.TrimSpace(payload.Text) == "" {
@@ -64,7 +65,7 @@ func handleManagement(request []byte) ([]byte, error) {
 					payload.Text = t
 				}
 			}
-			result := importTokensLineByLine(payload.Text)
+			result := importTokensLineByLine(payload.Text, strings.TrimSpace(payload.Prefix))
 			return okEnvelope(mgmtJSON(http.StatusOK, result))
 		}
 		if method == "POST" && strings.Contains(lowerPath, "/api/delete") {
@@ -470,7 +471,7 @@ func probeAccount(name string) map[string]any {
 	}
 }
 
-func importTokensLineByLine(text string) map[string]any {
+func importTokensLineByLine(text, prefix string) map[string]any {
 	lines := splitImportLines(text)
 	added, skipped, failed := 0, 0, 0
 	errors := make([]string, 0)
@@ -510,6 +511,7 @@ func importTokensLineByLine(text string) map[string]any {
 		storage := buildAuthStorage(token, email, accountID, label, sess, false, map[string]any{
 			"imported_at": time.Now().UTC().Format(time.RFC3339),
 			"file_name":   fileName,
+			"prefix":      prefix,
 		})
 		payload := mustJSON(storage)
 		if err := hostAuthSave(fileName, payload); err != nil {
@@ -834,7 +836,9 @@ input[type=checkbox]{width:14px;height:14px;cursor:pointer;accent-color:var(--ac
     <div class="card-head"><h2>批量导入</h2></div>
     <div class="card-body">
       <label class="fld" for="importText">每行一个 access_token</label>
-      <textarea id="importText" placeholder="eyJhbGciOi...&#10;user@example.com----eyJhbGciOi...&#10;{&quot;access_token&quot;:&quot;eyJ...&quot;,&quot;email&quot;:&quot;a@b.c&quot;}"></textarea>
+      <textarea id="importText" placeholder="eyJhbGciOi...&#10;user@example.com----eyJhbGciOi...&#10;{"access_token":"eyJ...","email":"a@b.c"}"></textarea>
+      <label class="fld" for="importPrefix" style="margin-top:12px">模型前缀 prefix（可选，留空则不添加前缀；导入后该账号模型名变为 <code><prefix>/<model></code>，例如 <code>web/gpt-image-2</code>）</label>
+      <input id="importPrefix" type="text" placeholder="例如 web" autocomplete="off"/>
       <div class="row">
         <button type="button" id="importBtn">导入</button>
         <button type="button" class="sec" id="clearBtn">清空</button>
@@ -1142,7 +1146,9 @@ input[type=checkbox]{width:14px;height:14px;cursor:pointer;accent-color:var(--ac
   $('search').oninput = render;
   $('statusFilter').onchange = render;
   $('reloadBtn').onclick = loadList;
-  $('clearBtn').onclick = function(){ $('importText').value = ''; };
+  $('clearBtn').onclick = function(){ $('importText').value = ''; $('importPrefix').value = ''; };
+  $('importPrefix').value = localStorage.getItem('chatgpt2api_cpa_plugin_prefix') || '';
+  $('importPrefix').onchange = function(){ localStorage.setItem('chatgpt2api_cpa_plugin_prefix', $('importPrefix').value.trim()); };
 
   $('mgmtKey').value = localStorage.getItem(KEY_STORE) || '';
   $('saveKey').onclick = function(){
@@ -1160,7 +1166,8 @@ input[type=checkbox]{width:14px;height:14px;cursor:pointer;accent-color:var(--ac
     errBox.style.display = 'none';
     try {
       var text = $('importText').value;
-      var data = await api('/plugins/' + PLUGIN + '/api/import', {method:'POST', body: JSON.stringify({text:text})});
+      var prefix = $('importPrefix').value.trim();
+      var data = await api('/plugins/' + PLUGIN + '/api/import', {method:'POST', body: JSON.stringify({text:text, prefix:prefix})});
       msg.textContent = '成功 ' + (data.added||0) + ' · 跳过 ' + (data.skipped||0) + ' · 失败 ' + (data.failed||0)
         + '（共 ' + (data.total||0) + ' 行）';
       msg.className = 'msg ' + ((data.failed || !data.ok) ? 'bad' : 'ok');
