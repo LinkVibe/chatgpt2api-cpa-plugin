@@ -352,6 +352,7 @@ func handleExecutorExecute(request []byte, stream bool) ([]byte, error) {
 			}
 			return nil, errStream
 		}
+		chunks = append(chunks, map[string]any{"Payload": chatStreamChunkBytes(format, finishReasonChunk(model))})
 		if done := chatStreamDoneBytes(format); len(done) > 0 {
 			chunks = append(chunks, map[string]any{"Payload": done})
 		}
@@ -483,10 +484,31 @@ func runExecutorStream(req executorRequest, client *chatgptClient, payload map[s
 		fail(errStream.Error())
 		return
 	}
+	if err := hostStreamEmit(streamID, chatStreamChunkBytes(format, finishReasonChunk(model))); err != nil {
+		fail(err.Error())
+		return
+	}
 	if done := chatStreamDoneBytes(format); len(done) > 0 {
 		if err := hostStreamEmit(streamID, done); err != nil {
 			fail(err.Error())
 		}
+	}
+}
+
+// finishReasonChunk builds the terminal chat-completions chunk carrying
+// finish_reason "stop" with an empty delta. The host does not synthesize this
+// for plugin executors, so without it clients see finish_reason "other".
+func finishReasonChunk(model string) map[string]any {
+	return map[string]any{
+		"id":      "chatcmpl-plugin",
+		"object":  "chat.completion.chunk",
+		"created": time.Now().Unix(),
+		"model":   model,
+		"choices": []map[string]any{{
+			"index":         0,
+			"delta":         map[string]any{},
+			"finish_reason": "stop",
+		}},
 	}
 }
 

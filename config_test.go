@@ -118,6 +118,49 @@ func TestChatStreamChunkFormat(t *testing.T) {
 	}
 }
 
+func TestSanitizeCitations(t *testing.T) {
+	cases := map[string]string{
+		"hello citeturn0search1turn0search4 world": "hello  world",
+		"turn0search1 result":                      " result",
+		"no citations here":                        "no citations here",
+		"text citeturn0search1 mid citeturn0 end":  "text  mid  end",
+	}
+	for in, want := range cases {
+		got := sanitizeCitations(in)
+		if got != want {
+			t.Fatalf("sanitizeCitations(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+func TestExtractTextDeltaSkipsVersionMarker(t *testing.T) {
+	// {"v":"v1"} is the encoding version marker, not text content.
+	got := extractTextDelta([]byte(`{"v":"v1"}`))
+	if got != "" {
+		t.Fatalf("version marker must not be extracted as text, got %q", got)
+	}
+	// Real append deltas are extracted.
+	got = extractTextDelta([]byte(`{"p":"/message/content/parts/0","o":"append","v":"hello"}`))
+	if got != "hello" {
+		t.Fatalf("append delta got %q, want hello", got)
+	}
+}
+
+func TestFinishReasonChunk(t *testing.T) {
+	c := finishReasonChunk("gpt-5")
+	choices, _ := c["choices"].([]map[string]any)
+	if len(choices) != 1 {
+		t.Fatal("expected one choice")
+	}
+	if choices[0]["finish_reason"] != "stop" {
+		t.Fatalf("finish_reason = %v, want stop", choices[0]["finish_reason"])
+	}
+	delta, _ := choices[0]["delta"].(map[string]any)
+	if len(delta) != 0 {
+		t.Fatalf("finish delta must be empty, got %v", delta)
+	}
+}
+
 // TestManagementRegisterDeclaresConfigRoutes guards the /api/config route
 // registration. The host only forwards /v0/management/plugins/<id>/api/config to
 // the plugin when the route is declared here; otherwise it answers 404 HTML and

@@ -1208,11 +1208,20 @@ func toConversationMessages(messages []map[string]any) []map[string]any {
 	return out
 }
 
+// citationMarkerRe matches ChatGPT web search citation markers embedded in
+// streamed text, e.g. "citeturn0search1turn0search4" or standalone "turn0search1".
+// These are internal pointers that API clients cannot render.
+var citationMarkerRe = regexp.MustCompile(`(?i)cite(?:turn\d+\w*)+|turn\d+search\d+`)
+
+func sanitizeCitations(s string) string {
+	return citationMarkerRe.ReplaceAllString(s, "")
+}
+
 func extractTextDelta(payload []byte) string {
 	// string payload
 	var s string
 	if json.Unmarshal(payload, &s) == nil {
-		return s
+		return sanitizeCitations(s)
 	}
 	var obj map[string]any
 	if json.Unmarshal(payload, &obj) != nil {
@@ -1220,12 +1229,13 @@ func extractTextDelta(payload []byte) string {
 	}
 	if o, _ := obj["o"].(string); o == "append" {
 		if v, ok := obj["v"].(string); ok {
-			return v
+			return sanitizeCitations(v)
 		}
 	}
-	if v, ok := obj["v"].(string); ok && obj["o"] == nil && obj["p"] == nil {
-		return v
-	}
+	// The bare {"v":"v1"} event (no o, no p) is the encoding version marker,
+	// not text content. chatgpt2api only treats bare-v as text when
+	// current_text is already non-empty; in streaming the first such event is
+	// always the version marker, so we skip it entirely.
 	if patches, ok := obj["v"].([]any); ok {
 		var b strings.Builder
 		for _, p := range patches {
@@ -1239,7 +1249,7 @@ func extractTextDelta(payload []byte) string {
 				}
 			}
 		}
-		return b.String()
+		return sanitizeCitations(b.String())
 	}
 	return ""
 }
