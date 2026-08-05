@@ -203,7 +203,7 @@ func (c *chatgptClient) listOfficialModels() ([]map[string]any, error) {
 		if strings.Contains(strings.ToLower(slug), "codex") {
 			continue
 		}
-		pub := "web-" + slug
+		pub := slug
 		if _, ok := seen[pub]; ok {
 			continue
 		}
@@ -211,7 +211,7 @@ func (c *chatgptClient) listOfficialModels() ([]map[string]any, error) {
 		methods := []string{"chat"}
 		title := strings.ToLower(slug + " " + str(m["title"]) + " " + str(m["description"]))
 		if strings.Contains(title, "image") || strings.Contains(slug, "image") || slug == "auto" {
-			// auto is used for picture_v2; expose image method on web-auto / image-ish slugs
+			// auto is used for picture_v2; expose image method on auto / image-ish slugs
 			if slug == "auto" || strings.Contains(slug, "image") {
 				methods = []string{"chat", "image"}
 			}
@@ -240,33 +240,33 @@ func (c *chatgptClient) listOfficialModels() ([]map[string]any, error) {
 		}
 		out = append(out, row)
 	}
-	// Always ensure image entry for website picture_v2 (official list may not expose web-gpt-image-2 slug).
-	if _, ok := seen["web-gpt-image-2"]; !ok {
+	// Always ensure image entry for website picture_v2 (official list may not expose gpt-image-2 slug).
+	if _, ok := seen["gpt-image-2"]; !ok {
 		out = append(out, map[string]any{
-			"ID":                         "web-gpt-image-2",
+			"ID":                         "gpt-image-2",
 			"Object":                     "model",
 			"OwnedBy":                    providerID,
-			"DisplayName":                "web-gpt-image-2 (chatgpt web picture_v2)",
+			"DisplayName":                "gpt-image-2 (chatgpt web picture_v2)",
 			"Name":                       "auto",
 			"Type":                       "openai-image",
 			"SupportedGenerationMethods": []string{"chat", "image"},
 			"UserDefined":                true,
 		})
 	}
-	if _, ok := seen["web-auto"]; !ok {
+	if _, ok := seen["auto"]; !ok {
 		hasAuto := false
 		for _, row := range out {
-			if str(row["ID"]) == "web-auto" {
+			if str(row["ID"]) == "auto" {
 				hasAuto = true
 				break
 			}
 		}
 		if !hasAuto {
 			out = append(out, map[string]any{
-				"ID":                         "web-auto",
+				"ID":                         "auto",
 				"Object":                     "model",
 				"OwnedBy":                    providerID,
-				"DisplayName":                "web-auto (chatgpt web)",
+				"DisplayName":                "auto (chatgpt web)",
 				"Name":                       "auto",
 				"Type":                       "openai-image",
 				"SupportedGenerationMethods": []string{"chat", "image"},
@@ -993,8 +993,9 @@ func (c *chatgptClient) streamTextConversation(messages []map[string]any, model 
 	if c.accessToken == "" {
 		path = "/backend-anon/conversation"
 	}
-	// Public id is web-*; upstream ChatGPT slug is without web- (image → auto).
-	upstreamModel := stripWebPrefix(model)
+	// Upstream ChatGPT slug equals the public id, except image generation maps
+	// to "auto" (matches openai_backend_api website path).
+	upstreamModel := model
 	if upstreamModel == "" || upstreamModel == "gpt-image-2" {
 		upstreamModel = "auto"
 	}
@@ -1114,15 +1115,6 @@ func imageModelSettings(model string) (upstream, effort string) {
 	// Website picture_v2 path always uses upstream model "auto" (matches openai_backend_api).
 	_ = model
 	return "auto", ""
-}
-
-// stripWebPrefix maps public web-* id to upstream ChatGPT model slug for text path.
-func stripWebPrefix(model string) string {
-	m := strings.TrimSpace(model)
-	if len(m) >= 4 && strings.EqualFold(m[:4], "web-") {
-		return m[4:]
-	}
-	return m
 }
 
 func decodeImageBytes(imageStr string) ([]byte, error) {

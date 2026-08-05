@@ -224,7 +224,7 @@ func listAccountRecords() ([]accountRecord, error) {
 		}
 		name := firstNonEmpty(str(m["name"]), str(m["Name"]), str(m["file_name"]), str(m["FileName"]), str(m["path"]))
 		provider := firstNonEmpty(str(m["provider"]), str(m["Provider"]), str(m["auth_provider"]))
-		id := firstNonEmpty(str(m["id"]), str(m["ID"]), str(m["auth_index"]), str(m["AuthIndex"]))
+		id := firstNonEmpty(str(m["auth_index"]), str(m["AuthIndex"]), str(m["id"]), str(m["ID"]))
 		email := firstNonEmpty(str(m["email"]), str(m["label"]), str(m["Label"]))
 		disabled := false
 		if b, ok := m["disabled"].(bool); ok {
@@ -863,6 +863,7 @@ input[type=checkbox]{width:14px;height:14px;cursor:pointer;accent-color:var(--ac
       <span id="bulkCount"></span>
       <button type="button" class="sec sm" id="bulkEnable">批量启用</button>
       <button type="button" class="danger sm" id="bulkDisable">批量禁用</button>
+      <button type="button" class="danger sm" id="bulkDelete">批量删除</button>
       <button type="button" class="sec sm" id="bulkProbe">批量检测</button>
       <button type="button" class="sec sm" id="bulkClear">取消选择</button>
     </div>
@@ -1048,6 +1049,7 @@ input[type=checkbox]{width:14px;height:14px;cursor:pointer;accent-color:var(--ac
           (a.disabled
             ? '<button class="sec sm" data-act="enable" data-name="' + n + '">启用</button>'
             : '<button class="danger sm" data-act="disable" data-name="' + n + '">禁用</button>') +
+          '<button class="danger sm" data-act="delete" data-name="' + n + '">删除</button>' +
         '</div></td>' +
       '</tr>';
     }).join('');
@@ -1081,6 +1083,19 @@ input[type=checkbox]{width:14px;height:14px;cursor:pointer;accent-color:var(--ac
     }
     // 宿主的 /auth-files/status 是启停的权威来源（运行时认证状态）。
     // 插件自有路由只写 StorageJSON，宿主不可用时作为兜底。
+    if (kind === 'delete') {
+      // 删除前先禁用：让该 auth 退出请求池，避免删除后下一次请求又把文件重建回来。
+      try { await api('/auth-files/status', {method:'PATCH', body: JSON.stringify({name:name, disabled:true})}); }
+      catch(e){ /* 禁用失败不阻塞删除，继续尝试 */ }
+      try {
+        await api('/auth-files?name=' + encodeURIComponent(name), {method:'DELETE'});
+      } catch(e){
+        // 宿主删除不可用（如 409 插件虚拟认证）：退回仅禁用。
+        await api('/plugins/' + PLUGIN + '/api/delete', {method:'POST', body: JSON.stringify({name:name})});
+        throw new Error('文件删除失败（已退回禁用）：' + (e.message || e));
+      }
+      return;
+    }
     var disabled = (kind !== 'enable');
     try {
       await api('/auth-files/status', {method:'PATCH', body: JSON.stringify({name:name, disabled:disabled})});
@@ -1094,7 +1109,9 @@ input[type=checkbox]{width:14px;height:14px;cursor:pointer;accent-color:var(--ac
     var btn = ev.target.closest('button[data-act]');
     if (btn) {
       var kind = btn.dataset.act, name = btn.dataset.name;
-      if (kind === 'disable' && !confirm('确认禁用 ' + name + ' ?')) return;
+      if (kind === 'delete') {
+        if (!confirm('确认删除 ' + name + ' ？\n将调用宿主删除接口删除该认证文件，且不再自动恢复。')) return;
+      } else if (kind === 'disable' && !confirm('确认禁用 ' + name + ' ?')) return;
       btn.disabled = true;
       try { await act(kind, name); if (kind !== 'probe') await loadList(); }
       catch(e){ alert(e.message || e); }
@@ -1118,8 +1135,8 @@ input[type=checkbox]{width:14px;height:14px;cursor:pointer;accent-color:var(--ac
   async function bulk(kind){
     var names = Object.keys(selected).filter(function(n){ return selected[n]; });
     if (!names.length) return;
-    var verb = kind === 'enable' ? '启用' : (kind === 'disable' ? '禁用' : '检测');
-    if (kind !== 'probe' && !confirm('确认' + verb + ' ' + names.length + ' 个账号？')) return;
+    var verb = kind === 'enable' ? '启用' : (kind === 'disable' ? '禁用' : (kind === 'delete' ? '删除' : '检测'));
+    if (kind !== 'probe' && !confirm('确认' + verb + ' ' + names.length + ' 个账号？' + (kind === 'delete' ? '\n删除不可恢复。' : ''))) return;
     for (var i=0;i<names.length;i++){
       try { await act(kind, names[i]); } catch(e){ /* 单个失败不中断批量 */ }
     }
@@ -1128,6 +1145,7 @@ input[type=checkbox]{width:14px;height:14px;cursor:pointer;accent-color:var(--ac
 
   $('bulkEnable').onclick  = function(){ bulk('enable'); };
   $('bulkDisable').onclick = function(){ bulk('disable'); };
+  $('bulkDelete').onclick  = function(){ bulk('delete'); };
   $('bulkProbe').onclick   = function(){ bulk('probe'); };
   $('bulkClear').onclick   = function(){ selected = {}; $('selAll').checked = false; render(); };
 

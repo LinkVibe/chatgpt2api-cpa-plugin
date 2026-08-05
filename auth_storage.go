@@ -98,7 +98,7 @@ func findAuthFileNameByToken(accessToken string) string {
 			continue
 		}
 		name := firstNonEmpty(str(m["name"]), str(m["Name"]), str(m["file_name"]), str(m["FileName"]))
-		id := firstNonEmpty(str(m["id"]), str(m["ID"]), str(m["auth_index"]), str(m["AuthIndex"]))
+		id := firstNonEmpty(str(m["auth_index"]), str(m["AuthIndex"]), str(m["id"]), str(m["ID"]))
 		// peek storage
 		storage := asBytes(m["StorageJSON"])
 		if len(storage) == 0 {

@@ -17,7 +17,7 @@ const (
 )
 
 // Overridden at link time: -ldflags "-X main.pluginVersion=1.2.3"
-var pluginVersion = "0.3.4"
+var pluginVersion = "0.3.5"
 
 func handleMethod(method string, request []byte) ([]byte, error) {
 	switch method {
@@ -48,11 +48,11 @@ func handleMethod(method string, request []byte) ([]byte, error) {
 		return handleAuthRefresh(request)
 	case "model.static":
 		// No token here — return minimal fallback; real list comes from model.for_auth.
-		return okEnvelope(map[string]any{"Provider": providerID, "Models": fallbackWebModels()})
+		return okEnvelope(map[string]any{"Provider": providerID, "Models": fallbackModels()})
 	case "model.for_auth":
 		return handleModelsForAuth(request)
 	case "model.register":
-		return okEnvelope(map[string]any{"Provider": providerID, "Models": fallbackWebModels()})
+		return okEnvelope(map[string]any{"Provider": providerID, "Models": fallbackModels()})
 	case "executor.identifier":
 		return okEnvelope(map[string]any{"identifier": providerID})
 	case "executor.execute":
@@ -87,7 +87,7 @@ func registration() map[string]any {
 			"Author":           pluginAuthor,
 			"GitHubRepository": pluginRepo,
 			"ConfigFields": []map[string]any{
-				{"Name": "default_model", "Type": "string", "Description": "Fallback model (e.g. web-gpt-image-2)."},
+				{"Name": "default_model", "Type": "string", "Description": "Fallback model (e.g. gpt-image-2)."},
 				{"Name": "image_poll_timeout_secs", "Type": "number", "Description": "Max seconds to poll conversation for image ids."},
 				{"Name": "image_poll_interval_secs", "Type": "number", "Description": "Poll interval seconds."},
 				{"Name": "image_initial_wait_secs", "Type": "number", "Description": "Wait before first poll after SSE."},
@@ -120,11 +120,11 @@ func registration() map[string]any {
 	}
 }
 
-// fallbackWebModels used when official fetch fails or no auth (static/register).
-func fallbackWebModels() []map[string]any {
+// fallbackModels used when official fetch fails or no auth (static/register).
+func fallbackModels() []map[string]any {
 	ids := []string{
-		"web-gpt-image-2",
-		"web-auto",
+		"gpt-image-2",
+		"auto",
 	}
 	out := make([]map[string]any, 0, len(ids))
 	for _, id := range ids {
@@ -154,7 +154,7 @@ func handleModelsForAuth(request []byte) ([]byte, error) {
 		token, _ = parseAccessToken(request)
 	}
 	if token == "" {
-		return okEnvelope(map[string]any{"Provider": providerID, "Models": fallbackWebModels()})
+		return okEnvelope(map[string]any{"Provider": providerID, "Models": fallbackModels()})
 	}
 	var storageMap map[string]any
 	_ = json.Unmarshal(storage, &storageMap)
@@ -165,7 +165,7 @@ func handleModelsForAuth(request []byte) ([]byte, error) {
 		if isTokenInvalidError(err.Error()) {
 			client.maybeDisableToken(err.Error())
 		}
-		return okEnvelope(map[string]any{"Provider": providerID, "Models": fallbackWebModels()})
+		return okEnvelope(map[string]any{"Provider": providerID, "Models": fallbackModels()})
 	}
 	return okEnvelope(map[string]any{"Provider": providerID, "Models": models})
 }
@@ -263,7 +263,7 @@ func handleExecutorExecute(request []byte, stream bool) ([]byte, error) {
 
 	payload, _ := requestBodyJSON(req)
 	model := resolveModelName(req, payload)
-	if err := validateWebModel(model); err != nil {
+	if err := validateModel(model); err != nil {
 		return nil, err
 	}
 
@@ -483,7 +483,7 @@ func runExecutorStream(req executorRequest, client *chatgptClient, payload map[s
 
 func isImageModel(model string) bool {
 	m := strings.ToLower(strings.TrimSpace(model))
-	return m == "web-gpt-image-2" || (strings.HasPrefix(m, "web-") && strings.Contains(m, "image"))
+	return m == "gpt-image-2" || strings.Contains(m, "image")
 }
 
 // isImageMethods reports whether a model exposes the image generation method.
@@ -496,19 +496,15 @@ func isImageMethods(methods []string) bool {
 	return false
 }
 
-// validateWebModel requires every inbound model to carry the web- prefix so this
-// plugin never collides with CPA codex models. The host stores the model id with
-// that prefix intact; the prefix is stripped again right before the upstream call.
-func validateWebModel(model string) error {
+// validateModel guards the inbound model so this plugin never picks up CPA
+// codex models. The model id is used as-is for both the registry and upstream.
+func validateModel(model string) error {
 	m := strings.ToLower(strings.TrimSpace(model))
 	if m == "" {
-		return fmt.Errorf("model is required; use web-* names e.g. web-gpt-image-2")
+		return fmt.Errorf("model is required (e.g. gpt-image-2, gpt-5)")
 	}
 	if strings.Contains(m, "codex") {
 		return fmt.Errorf("model %q is not handled here; use CPA codex provider", model)
-	}
-	if !strings.HasPrefix(m, "web-") {
-		return fmt.Errorf("model %q must use web- prefix (e.g. web-gpt-image-2, web-gpt-5); bare names are reserved for other providers", model)
 	}
 	return nil
 }
