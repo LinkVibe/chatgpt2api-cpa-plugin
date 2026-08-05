@@ -22,14 +22,14 @@ func TestIsTokenInvalidError(t *testing.T) {
 	}
 }
 
-func TestValidatePluginModel(t *testing.T) {
-	if err := validatePluginModel("gpt-image-2"); err != nil {
+func TestValidateWebModel(t *testing.T) {
+	if err := validateWebModel("web-gpt-image-2"); err != nil {
 		t.Fatal(err)
 	}
-	if err := validatePluginModel(""); err == nil {
-		t.Fatal("expected error for empty model")
+	if err := validateWebModel("gpt-image-2"); err == nil {
+		t.Fatal("expected error for bare gpt-image-2")
 	}
-	if err := validatePluginModel("codex-gpt-image-2"); err == nil {
+	if err := validateWebModel("codex-gpt-image-2"); err == nil {
 		t.Fatal("expected error for codex model")
 	}
 }
@@ -57,6 +57,15 @@ func TestStableIDsDeterministic(t *testing.T) {
 	}
 }
 
+func TestStripWebPrefix(t *testing.T) {
+	if got := stripWebPrefix("web-gpt-5"); got != "gpt-5" {
+		t.Fatalf("got %q", got)
+	}
+	if got := stripWebPrefix("WEB-auto"); got != "auto" {
+		t.Fatalf("got %q", got)
+	}
+}
+
 func TestEnsureImageBytesRejectsJSON(t *testing.T) {
 	err := ensureImageBytes([]byte(`{"detail":"File stream access denied."}`), "application/json")
 	if err == nil {
@@ -65,10 +74,10 @@ func TestEnsureImageBytesRejectsJSON(t *testing.T) {
 }
 
 func TestIsImageModel(t *testing.T) {
-	if !isImageModel("gpt-image-2") {
+	if !isImageModel("web-gpt-image-2") {
 		t.Fatal("expected image model")
 	}
-	if isImageModel("gpt-5") {
+	if isImageModel("web-gpt-5") {
 		t.Fatal("text model should not be image")
 	}
 }

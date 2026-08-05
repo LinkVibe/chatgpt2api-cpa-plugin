@@ -17,7 +17,7 @@ const (
 )
 
 // Overridden at link time: -ldflags "-X main.pluginVersion=1.2.3"
-var pluginVersion = "0.3.3"
+var pluginVersion = "0.3.4"
 
 func handleMethod(method string, request []byte) ([]byte, error) {
 	switch method {
@@ -87,7 +87,7 @@ func registration() map[string]any {
 			"Author":           pluginAuthor,
 			"GitHubRepository": pluginRepo,
 			"ConfigFields": []map[string]any{
-				{"Name": "default_model", "Type": "string", "Description": "Fallback model (e.g. gpt-image-2)."},
+				{"Name": "default_model", "Type": "string", "Description": "Fallback model (e.g. web-gpt-image-2)."},
 				{"Name": "image_poll_timeout_secs", "Type": "number", "Description": "Max seconds to poll conversation for image ids."},
 				{"Name": "image_poll_interval_secs", "Type": "number", "Description": "Poll interval seconds."},
 				{"Name": "image_initial_wait_secs", "Type": "number", "Description": "Wait before first poll after SSE."},
@@ -123,8 +123,8 @@ func registration() map[string]any {
 // fallbackWebModels used when official fetch fails or no auth (static/register).
 func fallbackWebModels() []map[string]any {
 	ids := []string{
-		"gpt-image-2",
-		"auto",
+		"web-gpt-image-2",
+		"web-auto",
 	}
 	out := make([]map[string]any, 0, len(ids))
 	for _, id := range ids {
@@ -133,6 +133,7 @@ func fallbackWebModels() []map[string]any {
 			"Object":                     "model",
 			"OwnedBy":                    providerID,
 			"DisplayName":                id + " (chatgpt web fallback)",
+			"Type":                       "openai-image",
 			"SupportedGenerationMethods": []string{"chat", "image"},
 			"UserDefined":                true,
 		})
@@ -190,34 +191,28 @@ func handleAuthParse(request []byte) ([]byte, error) {
 	sess := loadSessionFromStorage(token, storageMap)
 	fileName := firstNonEmpty(str(req["FileName"]), str(req["file_name"]), shortID(token)+".json")
 	disabled := storageDisabled(storageMap)
-	prefix := strings.TrimSpace(str(storageMap["prefix"]))
 	storage := buildAuthStorage(token, email, accountID, label, sess, disabled, map[string]any{
 		"file_name": fileName,
-		"prefix":    prefix,
 	})
-	authMap := map[string]any{
-		"Provider":    providerID,
-		"ID":          shortID(token),
-		"FileName":    fileName,
-		"Label":       label,
-		"Disabled":    disabled,
-		"StorageJSON": mustJSON(storage),
-		"Metadata": map[string]any{
-			"type":       providerID,
-			"email":      email,
-			"account_id": accountID,
-			"device_id":  sess.DeviceID,
-		},
-		"Attributes": map[string]any{
-			"provider": providerID,
-		},
-	}
-	if prefix != "" {
-		authMap["Prefix"] = prefix
-	}
 	return okEnvelope(map[string]any{
 		"Handled": true,
-		"Auth":    authMap,
+		"Auth": map[string]any{
+			"Provider":    providerID,
+			"ID":          shortID(token),
+			"FileName":    fileName,
+			"Label":       label,
+			"Disabled":    disabled,
+			"StorageJSON": mustJSON(storage),
+			"Metadata": map[string]any{
+				"type":       providerID,
+				"email":      email,
+				"account_id": accountID,
+				"device_id":  sess.DeviceID,
+			},
+			"Attributes": map[string]any{
+				"provider": providerID,
+			},
+		},
 	})
 }
 
@@ -232,22 +227,15 @@ func handleAuthRefresh(request []byte) ([]byte, error) {
 	email, accountID, label := resolveAccountIdentity(token, meta["email"])
 	storageMap := decodeStorageMap(raw)
 	sess := loadSessionFromStorage(token, storageMap)
-	prefix := strings.TrimSpace(str(storageMap["prefix"]))
-	storage := buildAuthStorage(token, email, accountID, label, sess, storageDisabled(storageMap), map[string]any{
-		"prefix": prefix,
-	})
-	authMap := map[string]any{
-		"Provider":         providerID,
-		"ID":               shortID(token),
-		"Label":            label,
-		"StorageJSON":      mustJSON(storage),
-		"NextRefreshAfter": time.Now().Add(24 * time.Hour).UTC().Format(time.RFC3339),
-	}
-	if prefix != "" {
-		authMap["Prefix"] = prefix
-	}
+	storage := buildAuthStorage(token, email, accountID, label, sess, storageDisabled(storageMap), nil)
 	return okEnvelope(map[string]any{
-		"Auth": authMap,
+		"Auth": map[string]any{
+			"Provider":         providerID,
+			"ID":               shortID(token),
+			"Label":            label,
+			"StorageJSON":      mustJSON(storage),
+			"NextRefreshAfter": time.Now().Add(24 * time.Hour).UTC().Format(time.RFC3339),
+		},
 	})
 }
 
@@ -275,7 +263,7 @@ func handleExecutorExecute(request []byte, stream bool) ([]byte, error) {
 
 	payload, _ := requestBodyJSON(req)
 	model := resolveModelName(req, payload)
-	if err := validatePluginModel(model); err != nil {
+	if err := validateWebModel(model); err != nil {
 		return nil, err
 	}
 
@@ -495,19 +483,32 @@ func runExecutorStream(req executorRequest, client *chatgptClient, payload map[s
 
 func isImageModel(model string) bool {
 	m := strings.ToLower(strings.TrimSpace(model))
-	return m == "gpt-image-2" || m == "auto" || strings.Contains(m, "image")
+	return m == "web-gpt-image-2" || (strings.HasPrefix(m, "web-") && strings.Contains(m, "image"))
 }
 
-// validatePluginModel rejects names the website path cannot serve (e.g. codex
-// slugs that belong to the CPA codex provider). The host-side auth prefix
-// (configurable) namespaces our models, so no web- prefix is required here.
-func validatePluginModel(model string) error {
+// isImageMethods reports whether a model exposes the image generation method.
+func isImageMethods(methods []string) bool {
+	for _, m := range methods {
+		if strings.EqualFold(strings.TrimSpace(m), "image") {
+			return true
+		}
+	}
+	return false
+}
+
+// validateWebModel requires every inbound model to carry the web- prefix so this
+// plugin never collides with CPA codex models. The host stores the model id with
+// that prefix intact; the prefix is stripped again right before the upstream call.
+func validateWebModel(model string) error {
 	m := strings.ToLower(strings.TrimSpace(model))
 	if m == "" {
-		return fmt.Errorf("model is required")
+		return fmt.Errorf("model is required; use web-* names e.g. web-gpt-image-2")
 	}
 	if strings.Contains(m, "codex") {
 		return fmt.Errorf("model %q is not handled here; use CPA codex provider", model)
+	}
+	if !strings.HasPrefix(m, "web-") {
+		return fmt.Errorf("model %q must use web- prefix (e.g. web-gpt-image-2, web-gpt-5); bare names are reserved for other providers", model)
 	}
 	return nil
 }

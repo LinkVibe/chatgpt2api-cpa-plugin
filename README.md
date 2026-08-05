@@ -4,7 +4,15 @@ CLIProxyAPI 独立插件仓库：用 ChatGPT **access_token** 直连 `chatgpt.co
 
 - 作者 / 仓库：[`LinkVibe/chatgpt2api-cpa-plugin`](https://github.com/LinkVibe/chatgpt2api-cpa-plugin)
 - 插件 ID：`chatgpt2api-cpa-plugin`
-- 版本：`0.3.3`
+- 版本：`0.3.4`
+
+## v0.3.4（Web 图片模型注册重构）
+
+- 插件级 `web-` 前缀模型（`web-gpt-image-2` / `web-auto`）：**显示为 `web-*`，真正上游调用时剥掉 `web-`**，以原生 slug 走通 `/v1/images/*`，无需改 CLIProxyAPI
+- 图片模型加 `Type: "openai-image"`，使主程序 `isOpenAICompatImagesModel` 白名单直接放行
+- 移除官方 `auth.Prefix` 依赖，不在导入时写入 prefix 字段，模型名唯一、无双份注册
+- 管理面板"检测"：修复 `no access_token in auth file` 的读取路径
+- `go test` 全绿
 
 ## v0.3.3（审计修复）
 
