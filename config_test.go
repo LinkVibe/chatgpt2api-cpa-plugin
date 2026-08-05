@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 )
@@ -88,5 +89,40 @@ func TestValidateConfigPayload(t *testing.T) {
 	}
 	if err := validateConfigPayload(map[string]any{"default_model": "codex-1"}); err == nil {
 		t.Fatal("expected codex default rejection")
+	}
+}
+
+// TestManagementRegisterDeclaresConfigRoutes guards the /api/config route
+// registration. The host only forwards /v0/management/plugins/<id>/api/config to
+// the plugin when the route is declared here; otherwise it answers 404 HTML and
+// the settings panel can neither load nor save.
+func TestManagementRegisterDeclaresConfigRoutes(t *testing.T) {
+	raw, err := handleManagementRegister()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var reg map[string]any
+	if err := json.Unmarshal(raw, &reg); err != nil {
+		t.Fatal(err)
+	}
+	result, _ := reg["result"].(map[string]any)
+	if result == nil {
+		t.Fatal("registration envelope missing result")
+	}
+	declared := map[string]bool{}
+	for _, r := range firstSlice(result, "routes", "Routes") {
+		m, _ := r.(map[string]any)
+		if m == nil {
+			continue
+		}
+		declared[strings.ToUpper(str(m["Method"]))+" "+str(m["Path"])] = true
+	}
+	for _, want := range []string{
+		"GET /plugins/chatgpt2api-cpa-plugin/api/config",
+		"POST /plugins/chatgpt2api-cpa-plugin/api/config",
+	} {
+		if !declared[want] {
+			t.Fatalf("management routes missing %s", want)
+		}
 	}
 }

@@ -29,6 +29,8 @@ func handleManagementRegister() ([]byte, error) {
 			{"Method": "POST", "Path": "/plugins/chatgpt2api-cpa-plugin/api/delete"},
 			{"Method": "POST", "Path": "/plugins/chatgpt2api-cpa-plugin/api/enable"},
 			{"Method": "POST", "Path": "/plugins/chatgpt2api-cpa-plugin/api/probe"},
+			{"Method": "GET", "Path": "/plugins/chatgpt2api-cpa-plugin/api/config"},
+			{"Method": "POST", "Path": "/plugins/chatgpt2api-cpa-plugin/api/config"},
 		},
 	})
 }
@@ -541,14 +543,14 @@ func configAPIView() map[string]any {
 	return map[string]any{
 		"ok": true,
 		"config": map[string]any{
-			"model_prefix":            c.ModelPrefix,
-			"default_model":           c.DefaultModel,
-			"image_poll_timeout_secs": c.ImagePollTimeoutSecs,
+			"model_prefix":             c.ModelPrefix,
+			"default_model":            c.DefaultModel,
+			"image_poll_timeout_secs":  c.ImagePollTimeoutSecs,
 			"image_poll_interval_secs": c.ImagePollIntervalSecs,
-			"image_initial_wait_secs": c.ImageInitialWaitSecs,
-			"image_settle_enabled":    c.ImageSettleEnabled,
-			"image_settle_wait_secs":  c.ImageSettleWaitSecs,
-			"disable_invalid_token":   c.DisableInvalidToken,
+			"image_initial_wait_secs":  c.ImageInitialWaitSecs,
+			"image_settle_enabled":     c.ImageSettleEnabled,
+			"image_settle_wait_secs":   c.ImageSettleWaitSecs,
+			"disable_invalid_token":    c.DisableInvalidToken,
 		},
 		"config_fields": fields,
 		"yaml":          configYAMLSnippet(c),
@@ -946,6 +948,23 @@ input[type=checkbox]{width:14px;height:14px;cursor:pointer;accent-color:var(--ac
 .bulk{display:none;gap:8px;align-items:center;padding:10px 16px;background:#ddf4ff;
   border-bottom:1px solid #b6e3ff;font-size:13px}
 .bulk.on{display:flex}
+.modal-mask{position:fixed;inset:0;background:rgba(31,35,40,.45);z-index:50;
+  display:none;align-items:flex-start;justify-content:center;overflow:auto}
+.modal-mask.on{display:flex}
+.modal{background:var(--card);border:1px solid var(--border-strong);border-radius:12px;
+  box-shadow:0 16px 48px rgba(31,35,40,.18);width:720px;max-width:calc(100vw - 32px);
+  margin:48px 16px;animation:pop .12s ease-out}
+@keyframes pop{from{transform:scale(.97);opacity:0}to{transform:scale(1);opacity:1}}
+.modal-head{padding:14px 18px;border-bottom:1px solid var(--border);
+  display:flex;align-items:center;gap:12px}
+.modal-head h2{font-size:15px;font-weight:600;margin:0}
+.modal-head .x{margin-left:auto;background:transparent;border:0;color:var(--muted);
+  font-size:20px;line-height:1;padding:2px 8px}
+.modal-head .x:hover{color:var(--text);background:var(--subtle)}
+.modal-body{padding:18px}
+.modal-foot{padding:14px 18px;border-top:1px solid var(--border);
+  display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.modal-foot .msg{margin:0 0 0 auto;max-width:60%}
 </style>
 </head>
 <body>
@@ -972,52 +991,64 @@ input[type=checkbox]{width:14px;height:14px;cursor:pointer;accent-color:var(--ac
     <div class="card-head">
       <h2>插件设置</h2>
       <div class="toolbar">
-        <button type="button" class="sec sm" id="cfgReload">重新载入</button>
+        <button type="button" id="openSettings">设置</button>
       </div>
     </div>
     <div class="card-body">
-      <div class="cfg-grid">
-        <label class="fld">
-          <span>模型前缀（自定义插件级模型前缀）</span>
-          <input id="cfgModelPrefix" placeholder="例如 web-；留空 = 原生模型名" autocomplete="off"/>
-          <em>所有注册模型 id 会加上此前缀（如 <code>web-gpt-5</code>），请求时自动剥掉再调用上游；可避免与 CPA 官方模型冲突。更改后需宿主重新拉取模型列表（重载插件）生效。</em>
-        </label>
-        <label class="fld">
-          <span>默认模型</span>
-          <input id="cfgDefaultModel" placeholder="gpt-image-2" autocomplete="off"/>
-        </label>
-        <label class="fld">
-          <span>图片轮询超时（秒）</span>
-          <input id="cfgPollTimeout" type="number" step="1" min="1"/>
-        </label>
-        <label class="fld">
-          <span>图片轮询间隔（秒）</span>
-          <input id="cfgPollInterval" type="number" step="0.5" min="0.5"/>
-        </label>
-        <label class="fld">
-          <span>首次等待（秒）</span>
-          <input id="cfgInitialWait" type="number" step="0.5" min="0"/>
-        </label>
-        <label class="fld">
-          <span>结算等待（秒）</span>
-          <input id="cfgSettleWait" type="number" step="0.5" min="0"/>
-        </label>
-        <label class="fld chk">
-          <input id="cfgSettleEnabled" type="checkbox"/>
-          <span>命中后额外结算轮询</span>
-        </label>
-        <label class="fld chk">
-          <input id="cfgDisableInvalid" type="checkbox"/>
-          <span>token 失效自动禁用</span>
-        </label>
+      <div class="hint" style="margin:0">模型前缀、默认模型、图片轮询参数、token 失效自动禁用等。点「设置」在弹窗中调整，保存会立即在当前进程生效，并写入 CPA 配置以便持久化。</div>
+    </div>
+  </div>
+
+  <div class="modal-mask" id="settingsMask">
+    <div class="modal" role="dialog" aria-modal="true" aria-label="插件设置">
+      <div class="modal-head">
+        <h2>插件设置</h2>
+        <button type="button" class="x" id="closeSettings" aria-label="关闭">×</button>
       </div>
-      <div class="row">
-        <button type="button" id="cfgSave">保存（立即生效）</button>
-        <button type="button" class="sec" id="cfgCopyYaml">复制 config.json 片段</button>
+      <div class="modal-body">
+        <div class="cfg-grid">
+          <label class="fld">
+            <span>模型前缀（自定义插件级模型前缀）</span>
+            <input id="cfgModelPrefix" placeholder="例如 web-；留空 = 原生模型名" autocomplete="off"/>
+            <em>所有注册模型 id 会加上此前缀（如 <code>web-gpt-5</code>），请求时自动剥掉再调用上游；可避免与 CPA 官方模型冲突。</em>
+          </label>
+          <label class="fld">
+            <span>默认模型</span>
+            <input id="cfgDefaultModel" placeholder="gpt-image-2" autocomplete="off"/>
+          </label>
+          <label class="fld">
+            <span>图片轮询超时（秒）</span>
+            <input id="cfgPollTimeout" type="number" step="1" min="1"/>
+          </label>
+          <label class="fld">
+            <span>图片轮询间隔（秒）</span>
+            <input id="cfgPollInterval" type="number" step="0.5" min="0.5"/>
+          </label>
+          <label class="fld">
+            <span>首次等待（秒）</span>
+            <input id="cfgInitialWait" type="number" step="0.5" min="0"/>
+          </label>
+          <label class="fld">
+            <span>结算等待（秒）</span>
+            <input id="cfgSettleWait" type="number" step="0.5" min="0"/>
+          </label>
+          <label class="fld chk">
+            <input id="cfgSettleEnabled" type="checkbox"/>
+            <span>命中后额外结算轮询</span>
+          </label>
+          <label class="fld chk">
+            <input id="cfgDisableInvalid" type="checkbox"/>
+            <span>token 失效自动禁用</span>
+          </label>
+        </div>
+        <div class="hint" style="margin-top:14px">模型前缀改动需要宿主重新拉取模型列表。保存后会写入 CPA 配置并立即在当前进程生效；请重载插件（或重启服务）以让新前缀对已注册模型生效。若未授权写入，可使用下方「复制 config 片段」手工粘贴到 CPA <code>config.json</code> 后重载。</div>
+        <textarea id="cfgYaml" class="yaml" readonly spellcheck="false" rows="5"></textarea>
       </div>
-      <div id="cfgMsg" class="msg"></div>
-      <div class="hint">保存只应用到当前进程；重启后由 CPA 的 <code>config.json</code> 决定（见下方片段）。模型前缀改动需要重载插件才会重新注册模型。</div>
-      <textarea id="cfgYaml" class="yaml" readonly spellcheck="false" rows="6"></textarea>
+      <div class="modal-foot">
+        <button type="button" class="sec" id="cfgCopyYaml">复制 config 片段</button>
+        <button type="button" id="cfgSave">保存</button>
+        <div id="cfgMsg" class="msg"></div>
+      </div>
     </div>
   </div>
 
@@ -1386,6 +1417,18 @@ input[type=checkbox]{width:14px;height:14px;cursor:pointer;accent-color:var(--ac
 
   function cfgNum(id, def){ var v = parseFloat($(id).value); return isNaN(v) ? def : v; }
 
+  function openSettings(){ loadConfig(); $('settingsMask').classList.add('on'); }
+  function closeSettings(){ $('settingsMask').classList.remove('on'); }
+
+  $('openSettings').onclick = openSettings;
+  $('closeSettings').onclick = closeSettings;
+  $('settingsMask').addEventListener('click', function(ev){
+    if (ev.target === $('settingsMask')) closeSettings();
+  });
+  document.addEventListener('keydown', function(ev){
+    if (ev.key === 'Escape') closeSettings();
+  });
+
   async function loadConfig(){
     try {
       var data = await api('/plugins/' + PLUGIN + '/api/config');
@@ -1399,10 +1442,31 @@ input[type=checkbox]{width:14px;height:14px;cursor:pointer;accent-color:var(--ac
       $('cfgSettleEnabled').checked = !!c.image_settle_enabled;
       $('cfgDisableInvalid').checked = !!c.disable_invalid_token;
       $('cfgYaml').value = data.yaml || '';
+      $('cfgMsg').className = 'msg';
+      $('cfgMsg').textContent = '';
     } catch(e){
       $('cfgMsg').textContent = '设置加载失败：' + String(e.message || e);
       $('cfgMsg').className = 'msg bad';
     }
+  }
+
+  // persistHostConfig writes the settings into CPA config.json (plugins.configs.<id>)
+  // via the host management API so they survive a plugin reload. PATCH shallow-
+  // merges, preserving enabled/priority. Best-effort: failures are surfaced to the
+  // user but do not block the in-memory save.
+  function persistHostConfig(body){
+    return fetch('/v0/management/plugins/' + PLUGIN + '/config', {
+      method: 'PATCH',
+      headers: {
+        'Authorization': 'Bearer ' + getKey(),
+        'Content-Type': 'application/json',
+        'Accept': 'application/json'
+      },
+      body: JSON.stringify(body)
+    }).then(function(res){
+      if (!res.ok) throw new Error('host 配置写入失败 status=' + res.status);
+      return res.json();
+    });
   }
 
   async function saveConfig(){
@@ -1421,9 +1485,16 @@ input[type=checkbox]{width:14px;height:14px;cursor:pointer;accent-color:var(--ac
     msg.textContent = '保存中…';
     try {
       var data = await api('/plugins/' + PLUGIN + '/api/config', {method:'POST', body: JSON.stringify(body)});
-      msg.textContent = '已保存（当前进程生效）。模型前缀改动需重载插件后宿主才会重新注册模型。';
-      msg.className = 'msg ok';
       $('cfgYaml').value = data.yaml || '';
+      var persisted = true, perr = '';
+      try { await persistHostConfig(body); }
+      catch(e){ persisted = false; perr = String(e.message || e); }
+      if (persisted) {
+        msg.textContent = '已保存并写入 CPA 配置（当前进程已生效）。模型前缀改动请重载插件后对注册模型生效。';
+      } else {
+        msg.textContent = '已保存（仅当前进程生效）。写入 CPA 配置失败：' + perr + '，可点「复制 config 片段」手工粘贴到 config.json 后重载。';
+      }
+      msg.className = 'msg ok';
     } catch(e){
       msg.textContent = '保存失败：' + String(e.message || e);
       msg.className = 'msg bad';
@@ -1445,7 +1516,6 @@ input[type=checkbox]{width:14px;height:14px;cursor:pointer;accent-color:var(--ac
     }
   }
 
-  $('cfgReload').onclick = loadConfig;
   $('cfgSave').onclick = saveConfig;
   $('cfgCopyYaml').onclick = copyYaml;
 

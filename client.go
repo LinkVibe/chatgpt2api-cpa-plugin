@@ -26,6 +26,8 @@ const (
 )
 
 var (
+	// apiBaseURL mirrors baseURL but is overridable in tests.
+	apiBaseURL          = baseURL
 	fileServiceIDRe     = regexp.MustCompile(`file-service://([A-Za-z0-9_-]+)`)
 	realImageFileIDRe   = regexp.MustCompile(`\bfile_00000000[a-f0-9]{24}\b`)
 	sedimentIDRe        = regexp.MustCompile(`sediment://([A-Za-z0-9_-]+)`)
@@ -279,19 +281,31 @@ func (c *chatgptClient) listOfficialModels() ([]map[string]any, error) {
 	return out, nil
 }
 
-// fetchQuotaInfo pulls the live image quota + plan from the ChatGPT web
-// conversation/init endpoint — the same source chatgpt2api uses. The image_gen
-// limits_progress entry carries the remaining quota and the reset timestamp;
-// default_account.plan_type carries the subscription tier.
+// fetchQuotaInfo pulls the live image quota + plan from the ChatGPT web API —
+// the same source chatgpt2api uses. Quota comes from POST /backend-api/
+// conversation/init (limits_progress.image_gen): it must be POSTed with a JSON
+// body or the server answers 400 "Invalid conversation init". The plan (plan_
+// type) is NOT present there; it comes from GET /backend-api/accounts/check.
 func (c *chatgptClient) fetchQuotaInfo() (quotaInfo, error) {
 	qi := quotaInfo{LastSyncAt: time.Now().UTC().Format(time.RFC3339)}
 	if c == nil || c.accessToken == "" {
 		return qi, nil
 	}
-	path := "/backend-api/conversation/init"
-	status, _, body, err := c.http("GET", baseURL+path, c.baseHeaders(path, map[string]string{
-		"Accept": "application/json",
-	}), nil, 30)
+
+	initPath := "/backend-api/conversation/init"
+	initBody, err := json.Marshal(map[string]any{
+		"gizmo_id":                nil,
+		"requested_default_model": nil,
+		"conversation_id":         nil,
+		"timezone_offset_min":     -480,
+	})
+	if err != nil {
+		return qi, err
+	}
+	status, _, body, err := c.http("POST", apiBaseURL+initPath, c.baseHeaders(initPath, map[string]string{
+		"Accept":       "application/json",
+		"Content-Type": "application/json",
+	}), initBody, 30)
 	if err != nil {
 		return qi, err
 	}
@@ -303,9 +317,6 @@ func (c *chatgptClient) fetchQuotaInfo() (quotaInfo, error) {
 		return qi, err
 	}
 	qi.Known = false
-	if acc, _ := root["default_account"].(map[string]any); acc != nil {
-		qi.Plan = str(acc["plan_type"])
-	}
 	if limits, _ := root["limits_progress"].([]any); limits != nil {
 		qi.Known = true
 		for _, item := range limits {
@@ -322,7 +333,42 @@ func (c *chatgptClient) fetchQuotaInfo() (quotaInfo, error) {
 	if qi.Quota <= 0 {
 		qi.Status = "限流"
 	}
+
+	qi.Plan = c.fetchPlan()
 	return qi, nil
+}
+
+// fetchPlan resolves the account's subscription tier from GET /backend-api/
+// accounts/check/v4-2023-04-27 (accounts.default.account.plan_type). Best-effort:
+// a failure here must not mark the whole quota snapshot as errored.
+func (c *chatgptClient) fetchPlan() string {
+	if c == nil || c.accessToken == "" {
+		return ""
+	}
+	path := "/backend-api/accounts/check/v4-2023-04-27?timezone_offset_min=-480"
+	status, _, body, err := c.http("GET", apiBaseURL+path, c.baseHeaders(path, map[string]string{
+		"Accept": "application/json",
+	}), nil, 30)
+	if err != nil || status >= 400 {
+		return ""
+	}
+	var root map[string]any
+	if err := json.Unmarshal(body, &root); err != nil {
+		return ""
+	}
+	acc, _ := root["accounts"].(map[string]any)
+	if acc == nil {
+		return ""
+	}
+	def, _ := acc["default"].(map[string]any)
+	if def == nil {
+		return ""
+	}
+	acct, _ := def["account"].(map[string]any)
+	if acct == nil {
+		return ""
+	}
+	return str(acct["plan_type"])
 }
 
 // decrementImageQuota applies one successful image generation to the stored
