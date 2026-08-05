@@ -1208,20 +1208,39 @@ func toConversationMessages(messages []map[string]any) []map[string]any {
 	return out
 }
 
-// citationMarkerRe matches ChatGPT web search citation markers embedded in
-// streamed text, e.g. "citeturn0search1turn0search4" or standalone "turn0search1".
-// These are internal pointers that API clients cannot render.
-var citationMarkerRe = regexp.MustCompile(`(?i)cite(?:turn\d+\w*)+|turn\d+search\d+`)
+// sanitizeText strips ChatGPT web annotation markers from streamed text so API
+// clients never see internal citation/bookmark/source icons. Two forms exist:
+//
+//  1. Private-use Unicode annotations: \ue200<kind>\ue202<data>\ue201. ChatGPT
+//     uses these for citations ("cite"), URL links, and bookmarks. Some clients
+//     render the inner "cite" label as a visible icon. We strip the entire
+//     \ue200...\ue201 span plus any trailing incomplete marker.
+//
+//  2. Plain-text citation pointers: "citeturn0search1turn0search4" or
+//     "turn0search1" — left over when the annotation delimiters were already
+//     consumed upstream but the readable pointer was not.
+//
+// This mirrors services/protocol/conversation.py:sanitize_output_text.
+var (
+	annotationSpanRe = regexp.MustCompile(`\x{e200}[^\x{e201}]*\x{e201}`)
+	annotationTailRe = regexp.MustCompile(`\x{e200}[^\x{e201}]*$`)
+	citationTextRe   = regexp.MustCompile(`(?i)cite(?:turn\d+\w*)+|turn\d+search\d+`)
+	privUseCharRe    = regexp.MustCompile(`[\x{e200}\x{e201}\x{e202}]`)
+)
 
-func sanitizeCitations(s string) string {
-	return citationMarkerRe.ReplaceAllString(s, "")
+func sanitizeText(s string) string {
+	s = annotationSpanRe.ReplaceAllString(s, "")
+	s = annotationTailRe.ReplaceAllString(s, "")
+	s = citationTextRe.ReplaceAllString(s, "")
+	s = privUseCharRe.ReplaceAllString(s, "")
+	return s
 }
 
 func extractTextDelta(payload []byte) string {
 	// string payload
 	var s string
 	if json.Unmarshal(payload, &s) == nil {
-		return sanitizeCitations(s)
+		return sanitizeText(s)
 	}
 	var obj map[string]any
 	if json.Unmarshal(payload, &obj) != nil {
@@ -1229,7 +1248,7 @@ func extractTextDelta(payload []byte) string {
 	}
 	if o, _ := obj["o"].(string); o == "append" {
 		if v, ok := obj["v"].(string); ok {
-			return sanitizeCitations(v)
+			return sanitizeText(v)
 		}
 	}
 	// The bare {"v":"v1"} event (no o, no p) is the encoding version marker,
@@ -1249,7 +1268,7 @@ func extractTextDelta(payload []byte) string {
 				}
 			}
 		}
-		return sanitizeCitations(b.String())
+		return sanitizeText(b.String())
 	}
 	return ""
 }

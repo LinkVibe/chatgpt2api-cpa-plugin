@@ -118,17 +118,21 @@ func TestChatStreamChunkFormat(t *testing.T) {
 	}
 }
 
-func TestSanitizeCitations(t *testing.T) {
+func TestSanitizeText(t *testing.T) {
 	cases := map[string]string{
 		"hello citeturn0search1turn0search4 world": "hello  world",
 		"turn0search1 result":                      " result",
 		"no citations here":                        "no citations here",
 		"text citeturn0search1 mid citeturn0 end":  "text  mid  end",
+		// Unicode private-use annotation markers (U+E200...U+E201, U=E202 separator)
+		"real text\uE200cite\uE202url\uE202label\uE201 end": "real text end",
+		// Trailing incomplete annotation
+		"tail\uE200dangling": "tail",
 	}
 	for in, want := range cases {
-		got := sanitizeCitations(in)
+		got := sanitizeText(in)
 		if got != want {
-			t.Fatalf("sanitizeCitations(%q) = %q, want %q", in, got, want)
+			t.Fatalf("sanitizeText(%q) = %q, want %q", in, got, want)
 		}
 	}
 }
