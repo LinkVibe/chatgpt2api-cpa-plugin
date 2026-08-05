@@ -138,10 +138,15 @@ func TestSanitizeText(t *testing.T) {
 }
 
 func TestExtractTextDeltaSkipsVersionMarker(t *testing.T) {
-	// {"v":"v1"} is the encoding version marker, not text content.
-	got := extractTextDelta([]byte(`{"v":"v1"}`))
+	// Bare JSON string "v1" (the encoding version marker) must not be text.
+	got := extractTextDelta([]byte(`"v1"`))
 	if got != "" {
-		t.Fatalf("version marker must not be extracted as text, got %q", got)
+		t.Fatalf("bare string v1 must not be extracted as text, got %q", got)
+	}
+	// {"v":"v1"} object form — also the version marker.
+	got = extractTextDelta([]byte(`{"v":"v1"}`))
+	if got != "" {
+		t.Fatalf("version marker object must not be extracted as text, got %q", got)
 	}
 	// Real append deltas are extracted.
 	got = extractTextDelta([]byte(`{"p":"/message/content/parts/0","o":"append","v":"hello"}`))

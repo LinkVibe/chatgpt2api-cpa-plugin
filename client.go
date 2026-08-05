@@ -1237,13 +1237,11 @@ func sanitizeText(s string) string {
 }
 
 func extractTextDelta(payload []byte) string {
-	// string payload
-	var s string
-	if json.Unmarshal(payload, &s) == nil {
-		return sanitizeText(s)
-	}
 	var obj map[string]any
 	if json.Unmarshal(payload, &obj) != nil {
+		// Non-object payloads (e.g. the bare "v1" encoding-version string) are
+		// protocol events, not text. chatgpt2api skips non-dict events entirely
+		// (iter_conversation_payloads: "if not isinstance(event, dict): continue").
 		return ""
 	}
 	if o, _ := obj["o"].(string); o == "append" {
@@ -1251,10 +1249,10 @@ func extractTextDelta(payload []byte) string {
 			return sanitizeText(v)
 		}
 	}
-	// The bare {"v":"v1"} event (no o, no p) is the encoding version marker,
-	// not text content. chatgpt2api only treats bare-v as text when
-	// current_text is already non-empty; in streaming the first such event is
-	// always the version marker, so we skip it entirely.
+	// Bare {"v":"v1"} (no o, no p, v is string) is the encoding version marker,
+	// not text. chatgpt2api only treats bare-v as text when current_text is
+	// already non-empty (apply_text_patch line 502); since the plugin's extractor
+	// is stateless we skip bare-v string events entirely.
 	if patches, ok := obj["v"].([]any); ok {
 		var b strings.Builder
 		for _, p := range patches {
