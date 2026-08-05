@@ -17,7 +17,7 @@ const (
 )
 
 // Overridden at link time: -ldflags "-X main.pluginVersion=1.2.3"
-var pluginVersion = "0.3.6"
+var pluginVersion = "0.3.7"
 
 func handleMethod(method string, request []byte) ([]byte, error) {
 	switch method {
