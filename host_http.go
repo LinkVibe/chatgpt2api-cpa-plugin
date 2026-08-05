@@ -20,6 +20,12 @@ var allowDirectHTTPFallback atomic.Bool
 
 func setHostPresent(v bool) { hostPresent.Store(v) }
 
+// streamIdlePoll is the backoff between idle stream_read calls when the host
+// has no buffered data yet. It bounds CPU to ~10 reads/sec while waiting, and
+// adds no latency when chunks are flowing.
+const streamIdlePoll = 100 * time.Millisecond
+
+// hostHTTPRequest carries a host-issued HTTP request.
 type hostHTTPRequest struct {
 	Method  string              `json:"method,omitempty"`
 	URL     string              `json:"url,omitempty"`
@@ -234,6 +240,12 @@ func doHTTPStreamSession(sess *accountSession, method, url string, headers map[s
 		}
 		if chunk.Done {
 			return status, nil
+		}
+		// The host may return an empty chunk immediately while data is still
+		// pending. Sleep on idle reads so the loop never busy-spins a CPU core
+		// for the whole stream window; reads carrying data stay unthrottled.
+		if len(chunk.Payload) == 0 && len(chunk.Chunks) == 0 {
+			time.Sleep(streamIdlePoll)
 		}
 	}
 }

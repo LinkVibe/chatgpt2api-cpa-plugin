@@ -94,6 +94,24 @@ func handleManagement(request []byte) ([]byte, error) {
 			}
 			return okEnvelope(mgmtJSON(http.StatusOK, probeAccount(name)))
 		}
+		if strings.Contains(lowerPath, "/api/config") {
+			if method == "GET" {
+				return okEnvelope(mgmtJSON(http.StatusOK, configAPIView()))
+			}
+			if method == "POST" {
+				body := extractRequestBody(req)
+				var payload map[string]any
+				if len(body) > 0 && json.Unmarshal(body, &payload) != nil {
+					return okEnvelope(mgmtJSON(http.StatusBadRequest, map[string]any{"ok": false, "error": "invalid config JSON"}))
+				}
+				if err := validateConfigPayload(payload); err != nil {
+					return okEnvelope(mgmtJSON(http.StatusBadRequest, map[string]any{"ok": false, "error": err.Error()}))
+				}
+				applyConfigMap(payload)
+				return okEnvelope(mgmtJSON(http.StatusOK, configAPIView()))
+			}
+			return okEnvelope(mgmtJSON(http.StatusMethodNotAllowed, map[string]any{"ok": false, "error": "method not allowed"}))
+		}
 		return okEnvelope(mgmtJSON(http.StatusNotFound, map[string]any{
 			"ok":    false,
 			"error": "not found: " + method + " " + path,
@@ -171,6 +189,13 @@ type accountView struct {
 	ExpiresAt     string `json:"expires_at,omitempty"`
 	ExpiresInDays int    `json:"expires_in_days"`
 	Expired       bool   `json:"expired"`
+
+	// Image quota snapshot (quota_info), synced from upstream conversation/init
+	// on probe/refresh and decremented locally on successful image generation.
+	Quota       int    `json:"quota"`
+	QuotaKnown  bool   `json:"quota_known"`
+	QuotaStatus string `json:"quota_status,omitempty"`
+	RestoreAt   string `json:"restore_at,omitempty"`
 
 	// Bookkeeping written by the auto-disable path / importer.
 	DisabledReason string `json:"disabled_reason,omitempty"`
@@ -322,6 +347,15 @@ func applyStorageFields(v *accountView, storage []byte) {
 	if v.Email == "" {
 		v.Email = firstNonEmpty(str(m["email"]), str(m["label"]))
 	}
+	qi := quotaInfoFromMap(m)
+	if qi.Plan != "" {
+		// Upstream plan_type wins over the JWT hint when present.
+		v.Plan = qi.Plan
+	}
+	v.Quota = qi.Quota
+	v.QuotaKnown = qi.Known
+	v.QuotaStatus = qi.normalizedStatus()
+	v.RestoreAt = qi.RestoreAt
 }
 
 // jwtPlan reads the ChatGPT plan tier from the auth claim namespace.
@@ -463,11 +497,106 @@ func probeAccount(name string) map[string]any {
 			"token_invalid": isTokenInvalidError(err.Error()),
 		}
 	}
-	return map[string]any{
-		"ok":     true,
-		"models": len(models),
-		"plan":   rec.view.Plan,
+	qi, qiErr := client.fetchQuotaInfo()
+	plan := rec.view.Plan
+	if qi.Plan != "" {
+		plan = qi.Plan
 	}
+	if qiErr == nil {
+		saveQuotaInfo(rec.token, rec.view.Name, storageMap, qi)
+	}
+	resp := map[string]any{
+		"ok":           true,
+		"models":       len(models),
+		"plan":         plan,
+		"quota":        qi.Quota,
+		"quota_known":  qi.Known,
+		"quota_status": qi.normalizedStatus(),
+		"restore_at":   qi.RestoreAt,
+	}
+	if qiErr != nil {
+		resp["quota_error"] = qiErr.Error()
+	}
+	return resp
+}
+
+// configAPIView returns the current effective plugin config plus a YAML snippet
+// the admin can paste into CPA config.json to persist the values (the host
+// delivers them on plugin.register/plugin.reconfigure). The panel applies them
+// in-memory immediately so they work without a restart.
+func configAPIView() map[string]any {
+	c := currentRuntimeConfig()
+	fields := make([]map[string]any, 0)
+	if reg := registration(); reg != nil {
+		if cf, ok := reg["ConfigFields"].([]map[string]any); ok {
+			fields = cf
+		} else if cf, ok := reg["ConfigFields"].([]any); ok {
+			for _, f := range cf {
+				if m, ok := f.(map[string]any); ok {
+					fields = append(fields, m)
+				}
+			}
+		}
+	}
+	return map[string]any{
+		"ok": true,
+		"config": map[string]any{
+			"model_prefix":            c.ModelPrefix,
+			"default_model":           c.DefaultModel,
+			"image_poll_timeout_secs": c.ImagePollTimeoutSecs,
+			"image_poll_interval_secs": c.ImagePollIntervalSecs,
+			"image_initial_wait_secs": c.ImageInitialWaitSecs,
+			"image_settle_enabled":    c.ImageSettleEnabled,
+			"image_settle_wait_secs":  c.ImageSettleWaitSecs,
+			"disable_invalid_token":   c.DisableInvalidToken,
+		},
+		"config_fields": fields,
+		"yaml":          configYAMLSnippet(c),
+	}
+}
+
+// configYAMLSnippet renders the plugin config block to paste into CPA config.json.
+func configYAMLSnippet(c runtimeConfig) string {
+	var b strings.Builder
+	b.WriteString("plugins:\n  configs:\n    " + providerID + ":\n")
+	b.WriteString("      enabled: true\n")
+	b.WriteString("      priority: 20\n")
+	b.WriteString("      model_prefix: " + configYAMLQuote(c.ModelPrefix) + "\n")
+	b.WriteString("      default_model: " + configYAMLQuote(c.DefaultModel) + "\n")
+	b.WriteString("      image_poll_timeout_secs: " + fmt.Sprintf("%v", c.ImagePollTimeoutSecs) + "\n")
+	b.WriteString("      image_poll_interval_secs: " + fmt.Sprintf("%v", c.ImagePollIntervalSecs) + "\n")
+	b.WriteString("      image_initial_wait_secs: " + fmt.Sprintf("%v", c.ImageInitialWaitSecs) + "\n")
+	b.WriteString("      image_settle_enabled: " + fmt.Sprintf("%v", c.ImageSettleEnabled) + "\n")
+	b.WriteString("      image_settle_wait_secs: " + fmt.Sprintf("%v", c.ImageSettleWaitSecs) + "\n")
+	b.WriteString("      disable_invalid_token: " + fmt.Sprintf("%v", c.DisableInvalidToken) + "\n")
+	return b.String()
+}
+
+func configYAMLQuote(s string) string {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return `""`
+	}
+	return `"` + strings.ReplaceAll(s, `"`, `\"`) + `"`
+}
+
+// validateConfigPayload rejects obviously invalid panel-submitted values.
+func validateConfigPayload(m map[string]any) error {
+	if v, ok := m["model_prefix"]; ok {
+		s := strings.TrimSpace(str(v))
+		if strings.ContainsAny(s, " \t\r\n") {
+			return fmt.Errorf("model_prefix must not contain spaces")
+		}
+	}
+	if s := str(m["default_model"]); s != "" {
+		if strings.Contains(strings.ToLower(s), "codex") {
+			return fmt.Errorf("default_model must not be a codex model")
+		}
+	}
+	if v, ok := toFloat(m["image_poll_timeout_secs"]); ok && v <= 0 {
+		return fmt.Errorf("image_poll_timeout_secs must be > 0")
+	}
+	return nil
 }
 
 func importTokensLineByLine(text string) map[string]any {
@@ -507,9 +636,11 @@ func importTokensLineByLine(text string) map[string]any {
 		email, accountID, label := resolveAccountIdentity(token, email)
 		fileName := fmt.Sprintf("chatgpt2api-cpa-plugin-%s.json", tokenFileSuffix(token))
 		sess := getOrCreateSession(token)
+		qi := quotaInfoFromJWT(token)
 		storage := buildAuthStorage(token, email, accountID, label, sess, false, map[string]any{
 			"imported_at": time.Now().UTC().Format(time.RFC3339),
 			"file_name":   fileName,
+			quotaInfoKey:  qi,
 		})
 		payload := mustJSON(storage)
 		if err := hostAuthSave(fileName, payload); err != nil {
@@ -763,6 +894,13 @@ input[type=text],input[type=password],textarea,select{
 input:focus,textarea:focus,select:focus{border-color:var(--accent);box-shadow:0 0 0 3px rgba(31,111,235,.12)}
 textarea{min-height:130px;font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:12px;resize:vertical}
 .row{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-top:12px}
+.cfg-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:12px 16px;align-items:start}
+.cfg-grid .fld em{display:block;font-style:normal;font-weight:400;color:var(--muted);margin-top:4px;line-height:1.5}
+.cfg-grid .fld.chk{display:flex;align-items:center;gap:8px;padding-top:14px}
+.cfg-grid .fld.chk input{width:auto}
+.cfg-grid .fld.chk span{font-weight:500}
+textarea.yaml{min-height:130px;background:#f6f8fa;border:1px dashed var(--border-strong)}
+textarea.yaml:focus{border-style:solid}
 button{background:var(--accent);color:#fff;border:1px solid transparent;border-radius:6px;
   padding:7px 13px;cursor:pointer;font-size:13px;font-weight:500;font-family:inherit;white-space:nowrap}
 button:hover{background:var(--accent-hover)}
@@ -831,6 +969,59 @@ input[type=checkbox]{width:14px;height:14px;cursor:pointer;accent-color:var(--ac
   </div>
 
   <div class="card">
+    <div class="card-head">
+      <h2>插件设置</h2>
+      <div class="toolbar">
+        <button type="button" class="sec sm" id="cfgReload">重新载入</button>
+      </div>
+    </div>
+    <div class="card-body">
+      <div class="cfg-grid">
+        <label class="fld">
+          <span>模型前缀（自定义插件级模型前缀）</span>
+          <input id="cfgModelPrefix" placeholder="例如 web-；留空 = 原生模型名" autocomplete="off"/>
+          <em>所有注册模型 id 会加上此前缀（如 <code>web-gpt-5</code>），请求时自动剥掉再调用上游；可避免与 CPA 官方模型冲突。更改后需宿主重新拉取模型列表（重载插件）生效。</em>
+        </label>
+        <label class="fld">
+          <span>默认模型</span>
+          <input id="cfgDefaultModel" placeholder="gpt-image-2" autocomplete="off"/>
+        </label>
+        <label class="fld">
+          <span>图片轮询超时（秒）</span>
+          <input id="cfgPollTimeout" type="number" step="1" min="1"/>
+        </label>
+        <label class="fld">
+          <span>图片轮询间隔（秒）</span>
+          <input id="cfgPollInterval" type="number" step="0.5" min="0.5"/>
+        </label>
+        <label class="fld">
+          <span>首次等待（秒）</span>
+          <input id="cfgInitialWait" type="number" step="0.5" min="0"/>
+        </label>
+        <label class="fld">
+          <span>结算等待（秒）</span>
+          <input id="cfgSettleWait" type="number" step="0.5" min="0"/>
+        </label>
+        <label class="fld chk">
+          <input id="cfgSettleEnabled" type="checkbox"/>
+          <span>命中后额外结算轮询</span>
+        </label>
+        <label class="fld chk">
+          <input id="cfgDisableInvalid" type="checkbox"/>
+          <span>token 失效自动禁用</span>
+        </label>
+      </div>
+      <div class="row">
+        <button type="button" id="cfgSave">保存（立即生效）</button>
+        <button type="button" class="sec" id="cfgCopyYaml">复制 config.json 片段</button>
+      </div>
+      <div id="cfgMsg" class="msg"></div>
+      <div class="hint">保存只应用到当前进程；重启后由 CPA 的 <code>config.json</code> 决定（见下方片段）。模型前缀改动需要重载插件才会重新注册模型。</div>
+      <textarea id="cfgYaml" class="yaml" readonly spellcheck="false" rows="6"></textarea>
+    </div>
+  </div>
+
+  <div class="card">
     <div class="card-head"><h2>批量导入</h2></div>
     <div class="card-body">
       <label class="fld" for="importText">每行一个 access_token</label>
@@ -855,6 +1046,8 @@ input[type=checkbox]{width:14px;height:14px;cursor:pointer;accent-color:var(--ac
           <option value="disabled">仅禁用</option>
           <option value="expiring">即将过期</option>
           <option value="expired">已过期</option>
+          <option value="limited">额度用尽</option>
+          <option value="quota_unknown">额度未知</option>
         </select>
       </div>
     </div>
@@ -873,6 +1066,8 @@ input[type=checkbox]{width:14px;height:14px;cursor:pointer;accent-color:var(--ac
         <th class="sortable" data-sort="name">文件 <span class="arrow"></span></th>
         <th class="sortable" data-sort="email">邮箱 / 标签 <span class="arrow"></span></th>
         <th class="sortable" data-sort="plan">套餐 <span class="arrow"></span></th>
+        <th class="sortable" data-sort="quota">额度 <span class="arrow"></span></th>
+        <th class="sortable" data-sort="restore">恢复时间 <span class="arrow"></span></th>
         <th class="sortable" data-sort="expires">Token 有效期 <span class="arrow"></span></th>
         <th class="sortable" data-sort="status">状态 <span class="arrow"></span></th>
         <th style="width:180px"></th>
@@ -948,6 +1143,21 @@ input[type=checkbox]{width:14px;height:14px;cursor:pointer;accent-color:var(--ac
     return '<span class="badge ok">' + d + ' 天</span> <span class="probe">' + date + '</span>';
   }
 
+  function quotaCell(a){
+    if (!a.quota_known) {
+      return '<span class="badge">未知</span>' +
+        (a.quota_status ? '<div class="probe">' + esc(a.quota_status) + '</div>' : '');
+    }
+    var cls = (a.quota > 0) ? 'ok' : 'bad';
+    return '<span class="badge ' + cls + '">' + a.quota + '</span>' +
+      '<div class="probe">' + esc(a.quota_status || '') + '</div>';
+  }
+
+  function restoreCell(a){
+    if (!a.restore_at) return '<span class="badge">—</span>';
+    return '<span class="probe">' + esc(a.restore_at.slice(0,10)) + '</span>';
+  }
+
   function statusCell(a){
     var out;
     if (a.disabled) {
@@ -958,19 +1168,27 @@ input[type=checkbox]{width:14px;height:14px;cursor:pointer;accent-color:var(--ac
     }
     var p = probes[a.name];
     if (p) {
-      out += '<div class="probe">' + (p.ok
+      var extra = p.ok
         ? '✓ 可用 · ' + esc(String(p.models)) + ' models'
-        : '✗ ' + esc(String(p.error || '').slice(0,80))) + '</div>';
+        : '✗ ' + esc(String(p.error || '').slice(0,80));
+      if (p.ok && p.quota_known) {
+        extra += ' · 额度 ' + p.quota + '（' + esc(String(p.quota_status || '正常')) + '）';
+      } else if (p.quota_error) {
+        extra += ' · 额度拉取失败';
+      }
+      out += '<div class="probe">' + extra + '</div>';
     }
     return out;
   }
 
   function sortVal(a, key){
-    if (key === 'name')   return (a.name || '').toLowerCase();
-    if (key === 'email')  return (a.email || '').toLowerCase();
-    if (key === 'plan')   return (a.plan || '').toLowerCase();
+    if (key === 'name')    return (a.name || '').toLowerCase();
+    if (key === 'email')   return (a.email || '').toLowerCase();
+    if (key === 'plan')    return (a.plan || '').toLowerCase();
+    if (key === 'quota')   return a.quota_known ? a.quota : -1;
+    if (key === 'restore') return a.restore_at || '';
     if (key === 'expires') return a.expires_at ? a.expires_in_days : 1e9;
-    if (key === 'status') return a.disabled ? 1 : 0;
+    if (key === 'status')  return a.disabled ? 1 : 0;
     return '';
   }
 
@@ -986,6 +1204,8 @@ input[type=checkbox]{width:14px;height:14px;cursor:pointer;accent-color:var(--ac
       if (st === 'disabled' && !a.disabled) return false;
       if (st === 'expired'  && !a.expired) return false;
       if (st === 'expiring' && !(a.expires_at && !a.expired && a.expires_in_days <= 7)) return false;
+      if (st === 'limited'  && !(a.quota_known && a.quota <= 0)) return false;
+      if (st === 'quota_unknown' && a.quota_known) return false;
       return true;
     });
     out.sort(function(x,y){
@@ -1042,6 +1262,8 @@ input[type=checkbox]{width:14px;height:14px;cursor:pointer;accent-color:var(--ac
         '<td class="name">' + n + '</td>' +
         '<td>' + esc(a.email || '—') + '<div class="probe">' + esc(a.preview || '') + '</div></td>' +
         '<td>' + planBadge(a) + '</td>' +
+        '<td>' + quotaCell(a) + '</td>' +
+        '<td>' + restoreCell(a) + '</td>' +
         '<td>' + expiryCell(a) + '</td>' +
         '<td>' + statusCell(a) + '</td>' +
         '<td><div class="acts">' +
@@ -1162,6 +1384,71 @@ input[type=checkbox]{width:14px;height:14px;cursor:pointer;accent-color:var(--ac
   $('reloadBtn').onclick = loadList;
   $('clearBtn').onclick = function(){ $('importText').value = ''; };
 
+  function cfgNum(id, def){ var v = parseFloat($(id).value); return isNaN(v) ? def : v; }
+
+  async function loadConfig(){
+    try {
+      var data = await api('/plugins/' + PLUGIN + '/api/config');
+      var c = data.config || {};
+      $('cfgModelPrefix').value = c.model_prefix || '';
+      $('cfgDefaultModel').value = c.default_model || '';
+      $('cfgPollTimeout').value = c.image_poll_timeout_secs;
+      $('cfgPollInterval').value = c.image_poll_interval_secs;
+      $('cfgInitialWait').value = c.image_initial_wait_secs;
+      $('cfgSettleWait').value = c.image_settle_wait_secs;
+      $('cfgSettleEnabled').checked = !!c.image_settle_enabled;
+      $('cfgDisableInvalid').checked = !!c.disable_invalid_token;
+      $('cfgYaml').value = data.yaml || '';
+    } catch(e){
+      $('cfgMsg').textContent = '设置加载失败：' + String(e.message || e);
+      $('cfgMsg').className = 'msg bad';
+    }
+  }
+
+  async function saveConfig(){
+    var body = {
+      model_prefix: $('cfgModelPrefix').value.trim(),
+      default_model: $('cfgDefaultModel').value.trim(),
+      image_poll_timeout_secs: cfgNum('cfgPollTimeout', 180),
+      image_poll_interval_secs: cfgNum('cfgPollInterval', 5),
+      image_initial_wait_secs: cfgNum('cfgInitialWait', 8),
+      image_settle_enabled: $('cfgSettleEnabled').checked,
+      image_settle_wait_secs: cfgNum('cfgSettleWait', 2),
+      disable_invalid_token: $('cfgDisableInvalid').checked
+    };
+    var msg = $('cfgMsg');
+    msg.className = 'msg';
+    msg.textContent = '保存中…';
+    try {
+      var data = await api('/plugins/' + PLUGIN + '/api/config', {method:'POST', body: JSON.stringify(body)});
+      msg.textContent = '已保存（当前进程生效）。模型前缀改动需重载插件后宿主才会重新注册模型。';
+      msg.className = 'msg ok';
+      $('cfgYaml').value = data.yaml || '';
+    } catch(e){
+      msg.textContent = '保存失败：' + String(e.message || e);
+      msg.className = 'msg bad';
+    }
+  }
+
+  function copyYaml(){
+    var ta = $('cfgYaml');
+    ta.select();
+    var ok = false;
+    try { ok = document.execCommand('copy'); } catch(e){}
+    var m = $('cfgMsg');
+    if (!ok) {
+      m.textContent = '已选中，请手动 Ctrl+C 复制';
+      m.className = 'msg';
+    } else {
+      m.textContent = '已复制 config.json 片段';
+      m.className = 'msg ok';
+    }
+  }
+
+  $('cfgReload').onclick = loadConfig;
+  $('cfgSave').onclick = saveConfig;
+  $('cfgCopyYaml').onclick = copyYaml;
+
   $('mgmtKey').value = localStorage.getItem(KEY_STORE) || '';
   $('saveKey').onclick = function(){
     localStorage.setItem(KEY_STORE, $('mgmtKey').value.trim());
@@ -1195,6 +1482,7 @@ input[type=checkbox]{width:14px;height:14px;cursor:pointer;accent-color:var(--ac
   };
 
   loadList();
+  loadConfig();
 })();
 </script>
 </body>

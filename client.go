@@ -203,7 +203,7 @@ func (c *chatgptClient) listOfficialModels() ([]map[string]any, error) {
 		if strings.Contains(strings.ToLower(slug), "codex") {
 			continue
 		}
-		pub := slug
+		pub := publicModel(slug)
 		if _, ok := seen[pub]; ok {
 			continue
 		}
@@ -241,32 +241,34 @@ func (c *chatgptClient) listOfficialModels() ([]map[string]any, error) {
 		out = append(out, row)
 	}
 	// Always ensure image entry for website picture_v2 (official list may not expose gpt-image-2 slug).
-	if _, ok := seen["gpt-image-2"]; !ok {
+	gptImageID := publicModel("gpt-image-2")
+	if _, ok := seen[gptImageID]; !ok {
 		out = append(out, map[string]any{
-			"ID":                         "gpt-image-2",
+			"ID":                         gptImageID,
 			"Object":                     "model",
 			"OwnedBy":                    providerID,
-			"DisplayName":                "gpt-image-2 (chatgpt web picture_v2)",
+			"DisplayName":                gptImageID + " (chatgpt web picture_v2)",
 			"Name":                       "auto",
 			"Type":                       "openai-image",
 			"SupportedGenerationMethods": []string{"chat", "image"},
 			"UserDefined":                true,
 		})
 	}
-	if _, ok := seen["auto"]; !ok {
+	autoID := publicModel("auto")
+	if _, ok := seen[autoID]; !ok {
 		hasAuto := false
 		for _, row := range out {
-			if str(row["ID"]) == "auto" {
+			if str(row["ID"]) == autoID {
 				hasAuto = true
 				break
 			}
 		}
 		if !hasAuto {
 			out = append(out, map[string]any{
-				"ID":                         "auto",
+				"ID":                         autoID,
 				"Object":                     "model",
 				"OwnedBy":                    providerID,
-				"DisplayName":                "auto (chatgpt web)",
+				"DisplayName":                autoID + " (chatgpt web)",
 				"Name":                       "auto",
 				"Type":                       "openai-image",
 				"SupportedGenerationMethods": []string{"chat", "image"},
@@ -275,6 +277,90 @@ func (c *chatgptClient) listOfficialModels() ([]map[string]any, error) {
 		}
 	}
 	return out, nil
+}
+
+// fetchQuotaInfo pulls the live image quota + plan from the ChatGPT web
+// conversation/init endpoint — the same source chatgpt2api uses. The image_gen
+// limits_progress entry carries the remaining quota and the reset timestamp;
+// default_account.plan_type carries the subscription tier.
+func (c *chatgptClient) fetchQuotaInfo() (quotaInfo, error) {
+	qi := quotaInfo{LastSyncAt: time.Now().UTC().Format(time.RFC3339)}
+	if c == nil || c.accessToken == "" {
+		return qi, nil
+	}
+	path := "/backend-api/conversation/init"
+	status, _, body, err := c.http("GET", baseURL+path, c.baseHeaders(path, map[string]string{
+		"Accept": "application/json",
+	}), nil, 30)
+	if err != nil {
+		return qi, err
+	}
+	if status >= 400 {
+		return qi, fmt.Errorf("conversation/init failed: status=%d body=%s", status, truncate(string(body), 300))
+	}
+	var root map[string]any
+	if err := json.Unmarshal(body, &root); err != nil {
+		return qi, err
+	}
+	qi.Known = false
+	if acc, _ := root["default_account"].(map[string]any); acc != nil {
+		qi.Plan = str(acc["plan_type"])
+	}
+	if limits, _ := root["limits_progress"].([]any); limits != nil {
+		qi.Known = true
+		for _, item := range limits {
+			m, _ := item.(map[string]any)
+			if m == nil || str(m["feature_name"]) != "image_gen" {
+				continue
+			}
+			qi.Quota = intFromAny(m["remaining"])
+			qi.RestoreAt = str(m["reset_after"])
+			break
+		}
+	}
+	qi.Status = "正常"
+	if qi.Quota <= 0 {
+		qi.Status = "限流"
+	}
+	return qi, nil
+}
+
+// decrementImageQuota applies one successful image generation to the stored
+// quota (1 per image, mirroring chatgpt2api). Best-effort: only when the quota
+// was synced from upstream, and never blocks the request path on failure.
+func (c *chatgptClient) decrementImageQuota(storageMap map[string]any, authFile string) {
+	if c == nil || c.accessToken == "" {
+		return
+	}
+	var current []byte
+	if id := str(storageMap["auth_index"]); id != "" {
+		if raw, err := hostAuthGet(id); err == nil {
+			current = raw
+		}
+	}
+	if len(current) == 0 && len(storageMap) > 0 {
+		current = mustJSON(storageMap)
+	}
+	var m map[string]any
+	if json.Unmarshal(current, &m) != nil || m == nil {
+		m = map[string]any{}
+	}
+	qi := quotaInfoFromMap(m)
+	if !qi.Known {
+		return
+	}
+	if qi.Quota > 0 {
+		qi.Quota--
+	}
+	qi.Status = qi.normalizedStatus()
+	qi.LastSyncAt = time.Now().UTC().Format(time.RFC3339)
+	m["type"] = providerID
+	m["access_token"] = c.accessToken
+	m[quotaInfoKey] = qi
+	name := resolveAuthFileName(c.accessToken, authFile, storageMap)
+	if err := hostAuthSave(name, mustJSON(m)); err != nil {
+		hostLog("warn", "decrement image quota save failed: "+err.Error())
+	}
 }
 
 func (c *chatgptClient) bootstrap() error {
@@ -993,9 +1079,10 @@ func (c *chatgptClient) streamTextConversation(messages []map[string]any, model 
 	if c.accessToken == "" {
 		path = "/backend-anon/conversation"
 	}
-	// Upstream ChatGPT slug equals the public id, except image generation maps
-	// to "auto" (matches openai_backend_api website path).
-	upstreamModel := model
+	// Upstream ChatGPT slug equals the public id minus the optional plugin-level
+	// prefix; image generation maps to "auto" (matches openai_backend_api website
+	// path).
+	upstreamModel := stripModelPrefix(model)
 	if upstreamModel == "" || upstreamModel == "gpt-image-2" {
 		upstreamModel = "auto"
 	}

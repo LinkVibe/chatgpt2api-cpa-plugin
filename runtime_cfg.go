@@ -9,6 +9,7 @@ import (
 
 // Runtime knobs (plugin config + defaults aligned with chatgpt2api).
 type runtimeConfig struct {
+	ModelPrefix           string
 	ImagePollTimeoutSecs  float64
 	ImagePollIntervalSecs float64
 	ImageInitialWaitSecs  float64
@@ -58,8 +59,17 @@ func applyPluginConfigYAML(raw []byte) {
 			m[k] = v
 		}
 	}
+	applyConfigMap(m)
+}
+
+// applyConfigMap applies a decoded config map (plugin config or panel /api/config
+// POST body). Unknown keys are ignored so host config can carry extra fields.
+func applyConfigMap(m map[string]any) {
 	cfgMu.Lock()
 	defer cfgMu.Unlock()
+	if s := strings.TrimSpace(str(m["model_prefix"])); s != "" || m["model_prefix"] != nil {
+		cfg.ModelPrefix = strings.TrimSpace(str(m["model_prefix"]))
+	}
 	if v, ok := toFloat(m["image_poll_timeout_secs"]); ok && v > 0 {
 		cfg.ImagePollTimeoutSecs = v
 	}
@@ -81,6 +91,25 @@ func applyPluginConfigYAML(raw []byte) {
 	if s := str(m["default_model"]); s != "" {
 		cfg.DefaultModel = s
 	}
+}
+
+// publicModel maps an upstream ChatGPT slug to the registered (public) model id,
+// applying the optional plugin-level prefix. The prefix keeps this plugin's
+// models from colliding with CPA's official provider names; empty by default.
+func publicModel(slug string) string {
+	return modelPrefix() + slug
+}
+
+// stripModelPrefix maps a public (possibly prefixed) model id back to the
+// upstream ChatGPT slug. Models without the prefix pass through unchanged.
+func stripModelPrefix(model string) string {
+	return strings.TrimPrefix(model, modelPrefix())
+}
+
+func modelPrefix() string {
+	cfgMu.RLock()
+	defer cfgMu.RUnlock()
+	return cfg.ModelPrefix
 }
 
 func toFloat(v any) (float64, bool) {

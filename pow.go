@@ -8,6 +8,7 @@ import (
 	"golang.org/x/crypto/sha3"
 	"math/rand"
 	"regexp"
+	"runtime"
 	"strconv"
 	"sync"
 	"time"
@@ -289,6 +290,12 @@ func (g *sentinelLoginGen) generateToken(seed, difficulty string) string {
 		}
 		if prefix <= difficulty {
 			return "gAAAAAB" + payload + "~S"
+		}
+		if i%4096 == 4095 {
+			// Yield periodically: the solve loop is CPU-bound and can run for
+			// many iterations, so hand the core back so other goroutines (host
+			// RPC, other streams) keep making progress.
+			runtime.Gosched()
 		}
 	}
 	return "gAAAAAB" + "wQ8Lk5FbGpA2NcR9dShT6gYjU7VxZ4D" + g.b64(nil)

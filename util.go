@@ -129,6 +129,42 @@ func firstNonEmpty(vals ...string) string {
 	return ""
 }
 
+// intFromAny coerces json numbers (float64 after unmarshal) to int.
+func intFromAny(v any) int {
+	switch t := v.(type) {
+	case float64:
+		return int(t)
+	case int:
+		return t
+	case int64:
+		return int(t)
+	case json.Number:
+		n, _ := t.Int64()
+		return int(n)
+	case string:
+		n := 0
+		_, _ = fmt.Sscanf(t, "%d", &n)
+		return n
+	default:
+		return 0
+	}
+}
+
+func boolFromAny(v any) bool {
+	if b, ok := v.(bool); ok {
+		return b
+	}
+	return str(v) == "true"
+}
+
+func cloneMap(m map[string]any) map[string]any {
+	out := make(map[string]any, len(m))
+	for k, v := range m {
+		out[k] = v
+	}
+	return out
+}
+
 func shortID(token string) string {
 	if len(token) > 16 {
 		return "c2a-" + token[len(token)-12:]

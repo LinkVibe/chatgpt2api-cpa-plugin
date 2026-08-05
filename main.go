@@ -17,7 +17,7 @@ const (
 )
 
 // Overridden at link time: -ldflags "-X main.pluginVersion=1.2.3"
-var pluginVersion = "0.3.5"
+var pluginVersion = "0.3.6"
 
 func handleMethod(method string, request []byte) ([]byte, error) {
 	switch method {
@@ -87,6 +87,7 @@ func registration() map[string]any {
 			"Author":           pluginAuthor,
 			"GitHubRepository": pluginRepo,
 			"ConfigFields": []map[string]any{
+				{"Name": "model_prefix", "Type": "string", "Description": "Plugin-level model prefix added to every registered model id and stripped before upstream calls (e.g. web-; empty = native slugs)."},
 				{"Name": "default_model", "Type": "string", "Description": "Fallback model (e.g. gpt-image-2)."},
 				{"Name": "image_poll_timeout_secs", "Type": "number", "Description": "Max seconds to poll conversation for image ids."},
 				{"Name": "image_poll_interval_secs", "Type": "number", "Description": "Poll interval seconds."},
@@ -128,11 +129,13 @@ func fallbackModels() []map[string]any {
 	}
 	out := make([]map[string]any, 0, len(ids))
 	for _, id := range ids {
+		pub := publicModel(id)
 		out = append(out, map[string]any{
-			"ID":                         id,
+			"ID":                         pub,
 			"Object":                     "model",
 			"OwnedBy":                    providerID,
-			"DisplayName":                id + " (chatgpt web fallback)",
+			"DisplayName":                pub + " (chatgpt web fallback)",
+			"Name":                       id,
 			"Type":                       "openai-image",
 			"SupportedGenerationMethods": []string{"chat", "image"},
 			"UserDefined":                true,
@@ -294,6 +297,7 @@ func handleExecutorExecute(request []byte, stream bool) ([]byte, error) {
 			}
 			return nil, errGen
 		}
+		client.decrementImageQuota(storageMap, authFile)
 		if format == "" {
 			format = "openai-image"
 		}
@@ -425,6 +429,8 @@ func runExecutorStream(req executorRequest, client *chatgptClient, payload map[s
 			fail(err.Error())
 			return
 		}
+		streamStorage := decodeStorageMap(req.StorageJSON)
+		client.decrementImageQuota(streamStorage, resolveAuthFileName(client.accessToken, req.FileName, streamStorage))
 		// /v1/images/generations has no incremental representation, so the whole
 		// JSON body goes out as a single chunk. This exists to participate in the
 		// bridge at all, not to stream content.
@@ -482,7 +488,7 @@ func runExecutorStream(req executorRequest, client *chatgptClient, payload map[s
 }
 
 func isImageModel(model string) bool {
-	m := strings.ToLower(strings.TrimSpace(model))
+	m := strings.ToLower(strings.TrimSpace(stripModelPrefix(model)))
 	return m == "gpt-image-2" || strings.Contains(m, "image")
 }
 
@@ -497,9 +503,10 @@ func isImageMethods(methods []string) bool {
 }
 
 // validateModel guards the inbound model so this plugin never picks up CPA
-// codex models. The model id is used as-is for both the registry and upstream.
+// codex models. The plugin-level prefix (if configured) is stripped first; the
+// remaining slug is used for both the registry and upstream.
 func validateModel(model string) error {
-	m := strings.ToLower(strings.TrimSpace(model))
+	m := strings.ToLower(strings.TrimSpace(stripModelPrefix(model)))
 	if m == "" {
 		return fmt.Errorf("model is required (e.g. gpt-image-2, gpt-5)")
 	}
