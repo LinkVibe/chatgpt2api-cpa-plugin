@@ -343,8 +343,7 @@ func handleExecutorExecute(request []byte, stream bool) ([]byte, error) {
 					"delta": map[string]any{"content": delta},
 				}},
 			}
-			line := "data: " + string(mustJSON(chunk)) + "\n\n"
-			chunks = append(chunks, map[string]any{"Payload": []byte(line)})
+			chunks = append(chunks, map[string]any{"Payload": chatStreamChunkBytes(format, chunk)})
 			return nil
 		})
 		if errStream != nil {
@@ -353,7 +352,9 @@ func handleExecutorExecute(request []byte, stream bool) ([]byte, error) {
 			}
 			return nil, errStream
 		}
-		chunks = append(chunks, map[string]any{"Payload": []byte("data: [DONE]\n\n")})
+		if done := chatStreamDoneBytes(format); len(done) > 0 {
+			chunks = append(chunks, map[string]any{"Payload": done})
+		}
 		return okEnvelope(map[string]any{
 			"headers": map[string][]string{"content-type": {"text/event-stream"}},
 			"chunks":  chunks,
@@ -473,7 +474,7 @@ func runExecutorStream(req executorRequest, client *chatgptClient, payload map[s
 				"delta": map[string]any{"content": delta},
 			}},
 		}
-		return hostStreamEmit(streamID, []byte("data: "+string(mustJSON(chunk))+"\n\n"))
+		return hostStreamEmit(streamID, chatStreamChunkBytes(format, chunk))
 	})
 	if errStream != nil {
 		if isTokenInvalidError(errStream.Error()) {
@@ -482,8 +483,10 @@ func runExecutorStream(req executorRequest, client *chatgptClient, payload map[s
 		fail(errStream.Error())
 		return
 	}
-	if err := hostStreamEmit(streamID, []byte("data: [DONE]\n\n")); err != nil {
-		fail(err.Error())
+	if done := chatStreamDoneBytes(format); len(done) > 0 {
+		if err := hostStreamEmit(streamID, done); err != nil {
+			fail(err.Error())
+		}
 	}
 }
 
@@ -519,6 +522,38 @@ func validateModel(model string) error {
 func isImageFormat(format string) bool {
 	f := strings.ToLower(strings.TrimSpace(format))
 	return f == "openai-image" || f == "image" || f == "images" || f == "images-generations" || f == "images-edits"
+}
+
+// isResponsesFormat reports whether the client requested the OpenAI Responses
+// streaming protocol. The host's responses SSE framer expects already-framed
+// "data: ...\n\n" chunks for this format; every other format (chat-completions /
+// openai) expects raw JSON chunks because the host applies the "data: %s\n\n"
+// framing itself (openai_handlers.go). Emitting "data:" here too would double-
+// frame and break client SSE parsers.
+func isResponsesFormat(format string) bool {
+	f := strings.ToLower(strings.TrimSpace(format))
+	return f == "openai-response" || f == "responses"
+}
+
+// chatStreamChunkBytes renders one chat-completions delta chunk in the wire
+// format the host expects for the requested output format.
+func chatStreamChunkBytes(format string, chunk map[string]any) []byte {
+	body := mustJSON(chunk)
+	if isResponsesFormat(format) {
+		return []byte("data: " + string(body) + "\n\n")
+	}
+	return body
+}
+
+// chatStreamDoneBytes renders the stream terminator for the requested format.
+// For chat-completions the host appends "data: [DONE]\n\n" itself when the
+// channel closes, so the plugin must NOT emit it (a second [DONE] makes some
+// clients JSON.parse "data: [DONE]" and error out).
+func chatStreamDoneBytes(format string) []byte {
+	if isResponsesFormat(format) {
+		return []byte("data: [DONE]\n\n")
+	}
+	return nil
 }
 
 func wantsImageGeneration(payload map[string]any) bool {

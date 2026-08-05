@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"strings"
 	"testing"
@@ -89,6 +90,31 @@ func TestValidateConfigPayload(t *testing.T) {
 	}
 	if err := validateConfigPayload(map[string]any{"default_model": "codex-1"}); err == nil {
 		t.Fatal("expected codex default rejection")
+	}
+}
+
+// TestChatStreamChunkFormat guards the stream wire format. The host's
+// chat-completions handler applies "data: %s\n\n" itself, so the plugin must
+// emit raw JSON for chat-completions (double framing breaks client SSE parsers).
+// The Responses SSE framer instead expects already-framed "data: ...\n\n".
+func TestChatStreamChunkFormat(t *testing.T) {
+	chunk := map[string]any{"object": "chat.completion.chunk"}
+	chat := chatStreamChunkBytes("chat-completions", chunk)
+	if bytes.HasPrefix(chat, []byte("data:")) {
+		t.Fatalf("chat-completions chunk must be raw JSON, got %q", chat)
+	}
+	if !json.Valid(chat) {
+		t.Fatalf("chat-completions chunk must be valid JSON, got %q", chat)
+	}
+	resp := chatStreamChunkBytes("openai-response", chunk)
+	if !bytes.HasPrefix(resp, []byte("data: ")) || !bytes.HasSuffix(resp, []byte("\n\n")) {
+		t.Fatalf("responses chunk must be SSE-framed, got %q", resp)
+	}
+	if chatStreamDoneBytes("chat-completions") != nil {
+		t.Fatal("chat-completions done must be nil — host appends [DONE]")
+	}
+	if string(chatStreamDoneBytes("openai-response")) != "data: [DONE]\n\n" {
+		t.Fatal("responses done must be data: [DONE]\\n\\n")
 	}
 }
 
