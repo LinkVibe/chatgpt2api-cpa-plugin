@@ -42,6 +42,9 @@ func applyPluginConfigYAML(raw []byte) {
 	if len(raw) == 0 {
 		return
 	}
+	if decoded, err := decodeLooseB64(string(raw)); err == nil {
+		raw = decoded
+	}
 	m := map[string]any{}
 	if err := json.Unmarshal(raw, &m); err != nil {
 		// minimal YAML line parser: key: value

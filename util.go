@@ -81,7 +81,7 @@ func asBytes(v any) []byte {
 	case []byte:
 		return t
 	case string:
-		if b, err := decodeLooseB64(t); err == nil && (json.Valid(b) || strings.HasPrefix(string(b), "eyJ")) {
+		if b, err := decodeLooseB64(t); err == nil {
 			return b
 		}
 		return []byte(t)
