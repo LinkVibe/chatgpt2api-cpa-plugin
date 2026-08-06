@@ -286,11 +286,11 @@ func handleExecutorExecute(request []byte, stream bool) ([]byte, error) {
 	}
 
 	if isImage {
-		prompt, images, n := extractImageRequest(payload)
+		prompt, images, n, size, quality := extractImageRequest(payload)
 		if prompt == "" {
 			return nil, fmt.Errorf("image prompt is required")
 		}
-		result, errGen := client.generateImages(prompt, model, n, images)
+		result, errGen := client.generateImages(prompt, model, n, size, quality, images)
 		if errGen != nil {
 			if isTokenInvalidError(errGen.Error()) {
 				client.maybeDisableToken(errGen.Error())
@@ -418,12 +418,12 @@ func runExecutorStream(req executorRequest, client *chatgptClient, payload map[s
 	}()
 
 	if isImage {
-		prompt, images, n := extractImageRequest(payload)
+		prompt, images, n, size, quality := extractImageRequest(payload)
 		if prompt == "" {
 			fail("image prompt is required")
 			return
 		}
-		result, err := client.generateImages(prompt, model, n, images)
+		result, err := client.generateImages(prompt, model, n, size, quality, images)
 		if err != nil {
 			if isTokenInvalidError(err.Error()) {
 				client.maybeDisableToken(err.Error())
@@ -593,8 +593,13 @@ func wantsImageGeneration(payload map[string]any) bool {
 	return false
 }
 
-func extractImageRequest(payload map[string]any) (prompt string, images []string, n int) {
+func extractImageRequest(payload map[string]any) (prompt string, images []string, n int, size, quality string) {
 	n = 1
+	size = str(payload["size"])
+	quality = str(payload["quality"])
+	if strings.TrimSpace(quality) == "" {
+		quality = "auto"
+	}
 	if v, ok := payload["n"].(float64); ok && int(v) > 0 {
 		n = int(v)
 	}
@@ -665,7 +670,7 @@ func extractImageRequest(payload map[string]any) (prompt string, images []string
 	if img := str(payload["image"]); img != "" {
 		images = append(images, img)
 	}
-	return prompt, images, n
+	return prompt, images, n, size, quality
 }
 
 func extractMessages(payload map[string]any) []map[string]any {

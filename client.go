@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"image"
 	_ "image/gif"
@@ -747,34 +748,64 @@ func (c *chatgptClient) startImageGeneration(prompt, model string, req *chatRequ
 	path := "/backend-api/f/conversation"
 	raw, _ := json.Marshal(payload)
 	col := newImageIDCollector()
+	textExtractor := newConversationTextExtractor("")
+	facts := &imageStreamFacts{}
 	var scanner sseLineScanner
 	var conversationID string
+	var terminalReached bool
 	// Image gen SSE can stay open a long time; wall timeout ~5 min.
 	streamHeaders := c.imageHeaders(path, req, conduit, "text/event-stream")
 	onLine := func(line []byte) {
+		if terminalReached {
+			return
+		}
 		data := sseData(line)
 		if data == nil {
 			return
 		}
 		s := string(data)
-		col.feed(s)
 		if conversationID == "" {
 			conversationID = extractConversationID(s)
+		}
+		col.feed(s)
+		textExtractor.extract(data)
+		updateImageStreamFacts(facts, data)
+		if isImageStreamTerminalPayload(data) {
+			terminalReached = true
 		}
 	}
 	status, err := doHTTPStreamSession(c.sess, "POST", baseURL+path, streamHeaders, raw, 300, func(chunk []byte) error {
 		scanner.feed(chunk, onLine)
+		if terminalReached {
+			return errImageStreamTerminal
+		}
 		return nil
 	})
 	scanner.flush(onLine)
-	if err != nil {
+	if err != nil && !errors.Is(err, errImageStreamTerminal) {
 		return nil, fmt.Errorf("image sse: %w", err)
 	}
 	if status >= 400 {
 		return nil, fmt.Errorf("image conversation failed: status=%d preview=%s", status, col.lastPreview)
 	}
 
-	// Upstream often finishes SSE before file ids are committed; always poll when possible.
+	messageText := strings.TrimSpace(textExtractor.text)
+	if messageText == "" {
+		messageText = facts.lastText
+	}
+	hasRefs := len(refs) > 0
+	shouldPoll := shouldPollForImage(facts, hasRefs)
+
+	// If the assistant turn was clearly not an image gen task (no tool arguments,
+	// no async_task_type image_gen, no asset pointer), there is nothing to poll.
+	if len(col.fileIDs) == 0 && len(col.sedimentIDs) == 0 && !shouldPoll {
+		if messageText != "" {
+			return nil, fmt.Errorf("image generation failed: %s", messageText)
+		}
+		return nil, fmt.Errorf("image generation failed: no image generated")
+	}
+
+	// Upstream often finishes SSE before file ids are committed; poll when possible.
 	rt := currentRuntimeConfig()
 	if conversationID != "" {
 		if rt.ImageInitialWaitSecs > 0 {
@@ -1044,7 +1075,7 @@ func hasImageAssetPointer(v any) bool {
 	return false
 }
 
-func (c *chatgptClient) generateImages(prompt, model string, n int, referenceImages []string) (map[string]any, error) {
+func (c *chatgptClient) generateImages(prompt, model string, n int, size, quality string, referenceImages []string) (map[string]any, error) {
 	if c.accessToken == "" {
 		return nil, fmt.Errorf("access_token is required")
 	}
@@ -1069,6 +1100,7 @@ func (c *chatgptClient) generateImages(prompt, model string, n int, referenceIma
 		}
 		refs = append(refs, up)
 	}
+	finalPrompt := buildImagePrompt(prompt, size, quality)
 	// multi-n: sequential generations
 	data := make([]map[string]any, 0, n)
 	var lastErr error
@@ -1080,11 +1112,11 @@ func (c *chatgptClient) generateImages(prompt, model string, n int, referenceIma
 				return nil, err
 			}
 		}
-		conduit, err := c.prepareImageConversation(prompt, model, reqI)
+		conduit, err := c.prepareImageConversation(finalPrompt, model, reqI)
 		if err != nil {
 			return nil, err
 		}
-		urls, err := c.startImageGeneration(prompt, model, reqI, conduit, refs)
+		urls, err := c.startImageGeneration(finalPrompt, model, reqI, conduit, refs)
 		if err != nil {
 			lastErr = err
 			continue
@@ -1524,9 +1556,399 @@ func extractTextDelta(payload []byte) string {
 }
 
 func imageModelSettings(model string) (upstream, effort string) {
-	// Website picture_v2 path always uses upstream model "auto" (matches openai_backend_api).
-	_ = model
+	m := strings.ToLower(strings.TrimSpace(stripModelPrefix(model)))
+	switch m {
+	case "gpt-image-2":
+		return "gpt-5-3", ""
+	case "codex-gpt-image-2":
+		return "codex-gpt-image-2", ""
+	}
 	return "auto", ""
+}
+
+// buildImagePrompt mirrors services/protocol/conversation.py:build_image_prompt:
+// append Chinese size/quality hints so the upstream picture_v2 path receives
+// the same prompt the official web UI sends.
+func buildImagePrompt(prompt, size, quality string) string {
+	prompt = strings.TrimSpace(prompt)
+	var hints []string
+	if size = strings.TrimSpace(size); size != "" {
+		hints = append(hints, "输出图片尺寸为 "+size+"。")
+	}
+	if quality = strings.TrimSpace(quality); quality == "" {
+		quality = "auto"
+	}
+	if quality != "" {
+		hints = append(hints, "输出图片质量为 "+quality+"。")
+	}
+	if len(hints) == 0 {
+		return prompt
+	}
+	return prompt + "\n\n" + strings.Join(hints, "")
+}
+
+var errImageStreamTerminal = errors.New("image stream terminal reached")
+
+var terminalMessageStatuses = map[string]bool{
+	"complete":                    true,
+	"completed":                   true,
+	"done":                        true,
+	"finished":                    true,
+	"finished_successfully":       true,
+	"finished_partial_completion": true,
+	"success":                     true,
+	"succeeded":                   true,
+}
+
+func isImageStreamTerminalPayload(data []byte) bool {
+	if len(data) > 64*1024 {
+		return false
+	}
+	var event map[string]any
+	if json.Unmarshal(data, &event) != nil {
+		return false
+	}
+	return payloadHasCompletionMarker(event) && anyStatusTerminal(payloadStatusValues(event))
+}
+
+func payloadHasCompletionMarker(v any) bool {
+	switch m := v.(type) {
+	case map[string]any:
+		for k, item := range m {
+			lk := strings.ToLower(strings.TrimSpace(k))
+			if lk == "is_complete" || lk == "complete" {
+				if b, ok := item.(bool); ok && b {
+					return true
+				}
+			}
+			if lk == "finish_details" {
+				if mm, ok := item.(map[string]any); ok && len(mm) > 0 {
+					return true
+				}
+			}
+			if payloadHasCompletionMarker(item) {
+				return true
+			}
+		}
+	case []any:
+		for _, item := range m {
+			if payloadHasCompletionMarker(item) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func payloadStatusValues(v any) []string {
+	var vals []string
+	var walk func(any)
+	walk = func(v any) {
+		switch m := v.(type) {
+		case map[string]any:
+			for k, item := range m {
+				lk := strings.ToLower(strings.TrimSpace(k))
+				if lk == "status" || lk == "state" {
+					if s, ok := item.(string); ok && strings.TrimSpace(s) != "" {
+						vals = append(vals, strings.ToLower(strings.TrimSpace(s)))
+					}
+				}
+				walk(item)
+			}
+		case []any:
+			for _, item := range m {
+				walk(item)
+			}
+		}
+	}
+	walk(v)
+	return vals
+}
+
+func anyStatusTerminal(statuses []string) bool {
+	for _, s := range statuses {
+		if terminalMessageStatuses[s] {
+			return true
+		}
+	}
+	return false
+}
+
+// imageStreamFacts tracks the metadata needed to decide whether the assistant
+// turn produced an image, a text refusal, or an error. It mirrors the facts
+// extracted by services/protocol/conversation.py:update_conversation_state.
+type imageStreamFacts struct {
+	role            string
+	contentType     string
+	status          string
+	endTurn         bool
+	blocked         bool
+	isError         bool
+	hasText         bool
+	hasAssetPointer bool
+	hasImageArgs    bool
+	turnUseCase     string
+	asyncTaskType   string
+	messageType     string
+	lastText        string
+}
+
+func updateImageStreamFacts(facts *imageStreamFacts, data []byte) {
+	if len(data) > 256*1024 {
+		return
+	}
+	var event map[string]any
+	if json.Unmarshal(data, &event) != nil {
+		return
+	}
+	if str(event["type"]) == "server_ste_metadata" {
+		if meta, ok := event["metadata"].(map[string]any); ok {
+			updateFactsFromMetadata(facts, meta)
+		}
+		return
+	}
+	if msg, ok := event["message"].(map[string]any); ok {
+		updateFactsFromMessage(facts, msg)
+	}
+	switch v := event["v"].(type) {
+	case map[string]any:
+		if msg, ok := v["message"].(map[string]any); ok {
+			updateFactsFromMessage(facts, msg)
+		} else {
+			updateFactsFromPatch(facts, v)
+		}
+	case []any:
+		for _, item := range v {
+			if m, ok := item.(map[string]any); ok {
+				updateFactsFromPatch(facts, m)
+			}
+		}
+	}
+}
+
+func updateFactsFromMessage(facts *imageStreamFacts, msg map[string]any) {
+	if author, ok := msg["author"].(map[string]any); ok {
+		if r := str(author["role"]); r != "" {
+			facts.role = r
+		}
+	}
+	if r := str(msg["role"]); r != "" {
+		facts.role = r
+	}
+	if s := str(msg["status"]); s != "" {
+		facts.status = s
+	}
+	if b, ok := msg["end_turn"].(bool); ok {
+		facts.endTurn = b
+	}
+	if b, ok := msg["blocked"].(bool); ok && b {
+		facts.blocked = true
+	}
+	if b, ok := msg["is_error"].(bool); ok && b {
+		facts.isError = true
+	}
+	if content, ok := msg["content"].(map[string]any); ok {
+		updateFactsFromContent(facts, content)
+	}
+	if meta, ok := msg["metadata"].(map[string]any); ok {
+		updateFactsFromMetadata(facts, meta)
+	}
+}
+
+func updateFactsFromContent(facts *imageStreamFacts, content map[string]any) {
+	if ct := str(content["content_type"]); ct != "" {
+		facts.contentType = ct
+	}
+	if t, ok := content["text"].(string); ok && strings.TrimSpace(t) != "" {
+		facts.hasText = true
+		if facts.role == "assistant" && (facts.contentType == "text" || facts.contentType == "code") {
+			facts.lastText = strings.TrimSpace(t)
+			if facts.contentType == "code" && looksLikeImageGenerationArguments(facts.lastText) {
+				facts.hasImageArgs = true
+			}
+		}
+	}
+	if parts, ok := content["parts"].([]any); ok {
+		for _, p := range parts {
+			updateFactsFromPartValue(facts, p)
+		}
+	}
+}
+
+func updateFactsFromPartValue(facts *imageStreamFacts, v any) {
+	if s, ok := v.(string); ok && strings.TrimSpace(s) != "" {
+		facts.hasText = true
+		if facts.role == "assistant" && (facts.contentType == "text" || facts.contentType == "code") {
+			facts.lastText = strings.TrimSpace(s)
+			if facts.contentType == "code" && looksLikeImageGenerationArguments(facts.lastText) {
+				facts.hasImageArgs = true
+			}
+		}
+		return
+	}
+	m, ok := v.(map[string]any)
+	if !ok {
+		return
+	}
+	if ct := str(m["content_type"]); ct == "image_asset_pointer" {
+		facts.hasAssetPointer = true
+	}
+	if ap := str(m["asset_pointer"]); strings.HasPrefix(ap, "file-service://") || strings.HasPrefix(ap, "sediment://") {
+		facts.hasAssetPointer = true
+	}
+	if parts, ok := m["parts"].([]any); ok {
+		for _, p := range parts {
+			updateFactsFromPartValue(facts, p)
+		}
+	}
+	if t, ok := m["text"].(string); ok {
+		updateFactsFromPartValue(facts, t)
+	}
+}
+
+func updateFactsFromMetadata(facts *imageStreamFacts, meta map[string]any) {
+	for _, name := range []string{"async_task_type", "turn_use_case", "message_type"} {
+		if v := str(meta[name]); v != "" {
+			switch name {
+			case "async_task_type":
+				facts.asyncTaskType = v
+			case "turn_use_case":
+				facts.turnUseCase = v
+			case "message_type":
+				facts.messageType = v
+			}
+		}
+	}
+	if b, ok := meta["blocked"].(bool); ok && b {
+		facts.blocked = true
+	}
+	if b, ok := meta["is_error"].(bool); ok && b {
+		facts.isError = true
+	}
+	if s := str(meta["status"]); s != "" {
+		facts.status = s
+	}
+}
+
+func updateFactsFromPatch(facts *imageStreamFacts, op map[string]any) {
+	p := str(op["p"])
+	v := op["v"]
+	switch {
+	case strings.HasSuffix(p, "/message/author/role"):
+		if s, ok := v.(string); ok {
+			facts.role = strings.ToLower(strings.TrimSpace(s))
+		}
+	case strings.HasSuffix(p, "/message/content/content_type"):
+		if s, ok := v.(string); ok {
+			facts.contentType = strings.ToLower(strings.TrimSpace(s))
+		}
+	case strings.HasSuffix(p, "/message/content/text"):
+		if s, ok := v.(string); ok {
+			updateFactsFromPartValue(facts, s)
+		}
+	case strings.HasSuffix(p, "/message/content/parts"):
+		if arr, ok := v.([]any); ok {
+			for _, it := range arr {
+				updateFactsFromPartValue(facts, it)
+			}
+		}
+	case strings.Contains(p, "/message/content/parts/"):
+		updateFactsFromPartValue(facts, v)
+	case strings.HasSuffix(p, "/message/status"), strings.HasSuffix(p, "/message/metadata/status"):
+		if s, ok := v.(string); ok {
+			facts.status = strings.ToLower(strings.TrimSpace(s))
+		}
+	case strings.HasSuffix(p, "/message/end_turn"):
+		if b, ok := v.(bool); ok {
+			facts.endTurn = b
+		}
+	case strings.HasSuffix(p, "/message/blocked"), strings.HasSuffix(p, "/message/metadata/blocked"):
+		if b, ok := v.(bool); ok && b {
+			facts.blocked = true
+		}
+	case strings.HasSuffix(p, "/message/is_error"), strings.HasSuffix(p, "/message/metadata/is_error"):
+		if b, ok := v.(bool); ok && b {
+			facts.isError = true
+		}
+	case strings.HasSuffix(p, "/message/metadata"):
+		if m, ok := v.(map[string]any); ok {
+			updateFactsFromMetadata(facts, m)
+		}
+	default:
+		parts := strings.Split(p, "/")
+		if len(parts) > 0 {
+			switch parts[len(parts)-1] {
+			case "async_task_type":
+				if s, ok := v.(string); ok {
+					facts.asyncTaskType = strings.ToLower(strings.TrimSpace(s))
+				}
+			case "turn_use_case":
+				if s, ok := v.(string); ok {
+					facts.turnUseCase = strings.ToLower(strings.TrimSpace(s))
+				}
+			case "message_type":
+				if s, ok := v.(string); ok {
+					facts.messageType = strings.ToLower(strings.TrimSpace(s))
+				}
+			}
+		}
+	}
+}
+
+func looksLikeImageGenerationArguments(s string) bool {
+	s = strings.TrimSpace(s)
+	if !strings.HasPrefix(s, "{") || !strings.HasSuffix(s, "}") {
+		return false
+	}
+	var m map[string]any
+	if json.Unmarshal([]byte(s), &m) != nil {
+		return false
+	}
+	hasPrompt := false
+	for _, k := range []string{"prompt", "instructions"} {
+		if v, ok := m[k]; ok {
+			if vs, ok := v.(string); ok && strings.TrimSpace(vs) != "" {
+				hasPrompt = true
+			}
+		}
+	}
+	hasOptions := false
+	hasN := false
+	hasSize := false
+	for _, k := range []string{"size", "n", "transparent_background", "is_style_transfer", "referenced_image_ids"} {
+		if _, ok := m[k]; ok {
+			hasOptions = true
+			if k == "n" {
+				hasN = true
+			}
+			if k == "size" {
+				hasSize = true
+			}
+		}
+	}
+	return (hasPrompt && hasOptions) || (hasN && hasSize)
+}
+
+func shouldPollForImage(facts *imageStreamFacts, hasReferences bool) bool {
+	if hasReferences {
+		return true
+	}
+	if facts.asyncTaskType == "image_gen" || strings.Contains(facts.asyncTaskType, "image") {
+		return true
+	}
+	if facts.turnUseCase == "image gen" || strings.Contains(facts.turnUseCase, "image") {
+		return true
+	}
+	if facts.messageType == "image_gen" || facts.messageType == "image_generation" || strings.Contains(facts.messageType, "image") {
+		return true
+	}
+	if facts.hasImageArgs {
+		return true
+	}
+	if facts.hasAssetPointer {
+		return true
+	}
+	return false
 }
 
 func decodeImageBytes(imageStr string) ([]byte, error) {
