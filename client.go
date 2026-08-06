@@ -1223,18 +1223,104 @@ func toConversationMessages(messages []map[string]any) []map[string]any {
 //
 // This mirrors services/protocol/conversation.py:sanitize_output_text.
 var (
-	annotationSpanRe = regexp.MustCompile(`\x{e200}[^\x{e201}]*\x{e201}`)
-	annotationTailRe = regexp.MustCompile(`\x{e200}[^\x{e201}]*$`)
-	citationTextRe   = regexp.MustCompile(`(?i)cite(?:turn\d+\w*)+|turn\d+search\d+`)
-	privUseCharRe    = regexp.MustCompile(`[\x{e200}\x{e201}\x{e202}]`)
+	annotationSpanRe   = regexp.MustCompile(`\x{e200}[^\x{e201}]*\x{e201}`)
+	annotationTailRe   = regexp.MustCompile(`\x{e200}[^\x{e201}]*$`)
+	citationTextRe     = regexp.MustCompile(`(?i)cite(?:turn\d+\w*)+|turn\d+search\d+`)
+	privUseCharRe      = regexp.MustCompile(`[\x{e200}\x{e201}\x{e202}]`)
+	spaceBeforePunctRe = regexp.MustCompile(`\s+([.,;:!?])`)
 )
 
 func sanitizeText(s string) string {
+	s = stripGoMapArtifacts(s)
 	s = annotationSpanRe.ReplaceAllString(s, "")
 	s = annotationTailRe.ReplaceAllString(s, "")
 	s = citationTextRe.ReplaceAllString(s, "")
 	s = privUseCharRe.ReplaceAllString(s, "")
+	s = spaceBeforePunctRe.ReplaceAllString(s, "$1")
 	return s
+}
+
+// stripGoMapArtifacts removes Go fmt.Sprint artifacts like "map[...]" that
+// leak into the stream when patch values are maps or slices. It only removes
+// map literals whose contents look like internal metadata to avoid stripping
+// legitimate user text (e.g. "map[string]int" in a code answer).
+func stripGoMapArtifacts(s string) string {
+	rs := []rune(s)
+	var b strings.Builder
+	b.Grow(len(s))
+	for i := 0; i < len(rs); i++ {
+		if i+3 < len(rs) && rs[i] == 'm' && rs[i+1] == 'a' && rs[i+2] == 'p' && rs[i+3] == '[' {
+			start := i + 4
+			depth := 1
+			j := start
+			for j < len(rs) && depth > 0 {
+				switch rs[j] {
+				case '[':
+					depth++
+				case ']':
+					depth--
+				}
+				j++
+			}
+			if depth == 0 {
+				inner := string(rs[start : j-1])
+				if looksLikeMetadataArtifact(inner) {
+					i = j - 1
+					continue
+				}
+			}
+		}
+		b.WriteRune(rs[i])
+	}
+	out := b.String()
+	out = strings.ReplaceAll(out, "[]", "")
+	return out
+}
+
+// looksLikeMetadataArtifact detects the Go map/slice artifacts produced by
+// str(map) or str([]any{map}) on internal upstream metadata structures.
+func looksLikeMetadataArtifact(inner string) bool {
+	inner = strings.ToLower(inner)
+	markers := []string{
+		"<nil>",
+		"alt:",
+		"end_idx:",
+		"start_idx:",
+		"invalid:",
+		"matched_text:",
+		"prompt_text:",
+		"refs:",
+		"safe_urls:",
+		"type:",
+		"finish_details",
+		"search_result_groups",
+		"grouped_webpages",
+		"sources_footnote",
+		"can_save",
+		"is_complete",
+		"stop_tokens",
+		"fallback_items",
+		"attribution:",
+		"pub_date:",
+		"ref_id",
+		"ref_type",
+		"turn_index",
+		"status:",
+		"error:",
+		"items:",
+		"snippet:",
+		"title:",
+		"url:",
+		"domain:",
+		"entries:",
+		"supporting_websites",
+	}
+	for _, m := range markers {
+		if strings.Contains(inner, m) {
+			return true
+		}
+	}
+	return false
 }
 
 // conversationTextExtractor turns upstream ChatGPT SSE payloads into sanitized
@@ -1310,6 +1396,12 @@ func (e *conversationTextExtractor) messageText(message map[string]any) string {
 	if content == nil {
 		return ""
 	}
+	// Only consume normal assistant text. Other content types (code, tool args,
+	// search result JSON, etc.) should not be echoed as user-facing text.
+	contentType := str(content["content_type"])
+	if contentType != "" && contentType != "text" && contentType != "multimodal_text" {
+		return ""
+	}
 	if parts, ok := content["parts"].([]any); ok && len(parts) > 0 {
 		var b strings.Builder
 		for _, p := range parts {
@@ -1321,7 +1413,10 @@ func (e *conversationTextExtractor) messageText(message map[string]any) string {
 			return b.String()
 		}
 	}
-	return str(content["text"])
+	if text, ok := content["text"].(string); ok {
+		return text
+	}
+	return ""
 }
 
 func (e *conversationTextExtractor) applyTextPatch(event map[string]any, currentText, historyText string) string {
@@ -1351,11 +1446,17 @@ func (e *conversationTextExtractor) applyTextPatch(event map[string]any, current
 }
 
 func (e *conversationTextExtractor) applyPatchOp(op map[string]any, currentText, historyText string) string {
+	value, ok := op["v"].(string)
+	if !ok {
+		// Non-string patch values are upstream metadata (maps, slices, numbers).
+		// Converting them with str() leaks Go map/list literals into the output.
+		return currentText
+	}
 	switch str(op["o"]) {
 	case "append":
-		return currentText + str(op["v"])
+		return currentText + value
 	case "replace":
-		return stripHistory(str(op["v"]), historyText)
+		return stripHistory(value, historyText)
 	}
 	return currentText
 }
