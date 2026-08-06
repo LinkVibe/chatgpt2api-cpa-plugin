@@ -1435,15 +1435,17 @@ func (e *conversationTextExtractor) messageText(message map[string]any) string {
 }
 
 func (e *conversationTextExtractor) applyTextPatch(event map[string]any, currentText, historyText string) string {
-	if p, _ := event["p"].(string); p == "/message/content/parts/0" || p == "/message/content/text" {
+	p, _ := event["p"].(string)
+	op, _ := event["o"].(string)
+
+	// Only apply append/replace patches that target the assistant text.
+	// Metadata patches (p starting with "/message/metadata/...") must be ignored.
+	if p == "/message/content/parts/0" || p == "/message/content/text" ||
+		((op == "append" || op == "replace") && p == "") {
 		return e.applyPatchOp(event, currentText, historyText)
 	}
 
-	if op, _ := event["o"].(string); op == "append" || op == "replace" {
-		return e.applyPatchOp(event, currentText, historyText)
-	}
-
-	if v, ok := event["v"].(string); ok && currentText != "" && event["p"] == nil && event["o"] == nil {
+	if v, ok := event["v"].(string); ok && currentText != "" && p == "" && event["o"] == nil {
 		return currentText + v
 	}
 
