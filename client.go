@@ -1147,6 +1147,7 @@ func (c *chatgptClient) streamTextConversation(messages []map[string]any, model 
 	raw, _ := json.Marshal(payload)
 	var scanner sseLineScanner
 	streamHeaders := c.conversationHeaders(path, req)
+	extractor := newConversationTextExtractor(assistantHistoryText(messages))
 	var deltaErr error
 	onLine := func(line []byte) {
 		if deltaErr != nil {
@@ -1156,7 +1157,7 @@ func (c *chatgptClient) streamTextConversation(messages []map[string]any, model 
 		if data == nil {
 			return
 		}
-		delta := extractTextDelta(data)
+		delta := extractor.extract(data)
 		if delta == "" {
 			return
 		}
@@ -1236,39 +1237,172 @@ func sanitizeText(s string) string {
 	return s
 }
 
-func extractTextDelta(payload []byte) string {
-	var obj map[string]any
-	if json.Unmarshal(payload, &obj) != nil {
+// conversationTextExtractor turns upstream ChatGPT SSE payloads into sanitized
+// text deltas. It mirrors chatgpt2api's assistant_text / apply_text_patch and
+// keeps a cumulative text state, which is required to handle message events,
+// replace/patch operations and bare-v appends correctly.
+type conversationTextExtractor struct {
+	rawText     string
+	text        string
+	historyText string
+}
+
+func newConversationTextExtractor(historyText string) *conversationTextExtractor {
+	return &conversationTextExtractor{historyText: historyText}
+}
+
+func (e *conversationTextExtractor) extract(payload []byte) string {
+	var event map[string]any
+	if json.Unmarshal(payload, &event) != nil {
 		// Non-object payloads (e.g. the bare "v1" encoding-version string) are
-		// protocol events, not text. chatgpt2api skips non-dict events entirely
-		// (iter_conversation_payloads: "if not isinstance(event, dict): continue").
+		// protocol events, not text. chatgpt2api skips non-dict events entirely.
 		return ""
 	}
-	if o, _ := obj["o"].(string); o == "append" {
-		if v, ok := obj["v"].(string); ok {
-			return sanitizeText(v)
+
+	nextRaw := e.nextRawText(event)
+	if nextRaw == "" || nextRaw == e.rawText {
+		return ""
+	}
+	e.rawText = nextRaw
+
+	nextText := sanitizeText(nextRaw)
+	if nextText == e.text {
+		return ""
+	}
+
+	var delta string
+	if strings.HasPrefix(nextText, e.text) {
+		delta = nextText[len(e.text):]
+	} else {
+		delta = nextText
+	}
+	e.text = nextText
+	return delta
+}
+
+func (e *conversationTextExtractor) nextRawText(event map[string]any) string {
+	// Some events carry the full assistant message object. Prefer that when
+	// available because it is authoritative and already cumulative.
+	for _, candidate := range []any{event, event["v"]} {
+		m, ok := candidate.(map[string]any)
+		if !ok {
+			continue
+		}
+		msg, ok := m["message"].(map[string]any)
+		if !ok {
+			continue
+		}
+		author, _ := msg["author"].(map[string]any)
+		if str(author["role"]) != "assistant" {
+			continue
+		}
+		if t := e.messageText(msg); t != "" {
+			return t
 		}
 	}
-	// Bare {"v":"v1"} (no o, no p, v is string) is the encoding version marker,
-	// not text. chatgpt2api only treats bare-v as text when current_text is
-	// already non-empty (apply_text_patch line 502); since the plugin's extractor
-	// is stateless we skip bare-v string events entirely.
-	if patches, ok := obj["v"].([]any); ok {
+
+	// Otherwise apply the patch protocol.
+	return e.applyTextPatch(event, e.rawText, e.historyText)
+}
+
+func (e *conversationTextExtractor) messageText(message map[string]any) string {
+	content, _ := message["content"].(map[string]any)
+	if content == nil {
+		return ""
+	}
+	if parts, ok := content["parts"].([]any); ok && len(parts) > 0 {
 		var b strings.Builder
-		for _, p := range patches {
-			pm, _ := p.(map[string]any)
-			if pm == nil {
-				continue
+		for _, p := range parts {
+			if s, ok := p.(string); ok {
+				b.WriteString(s)
 			}
-			if o, _ := pm["o"].(string); o == "append" {
-				if s, ok := pm["v"].(string); ok {
-					b.WriteString(s)
+		}
+		if b.Len() > 0 {
+			return b.String()
+		}
+	}
+	return str(content["text"])
+}
+
+func (e *conversationTextExtractor) applyTextPatch(event map[string]any, currentText, historyText string) string {
+	if p, _ := event["p"].(string); p == "/message/content/parts/0" || p == "/message/content/text" {
+		return e.applyPatchOp(event, currentText, historyText)
+	}
+
+	if op, _ := event["o"].(string); op == "append" || op == "replace" {
+		return e.applyPatchOp(event, currentText, historyText)
+	}
+
+	if v, ok := event["v"].(string); ok && currentText != "" && event["p"] == nil && event["o"] == nil {
+		return currentText + v
+	}
+
+	if ops, ok := event["v"].([]any); ok {
+		text := currentText
+		for _, item := range ops {
+			if m, ok := item.(map[string]any); ok {
+				text = e.applyTextPatch(m, text, historyText)
+			}
+		}
+		return text
+	}
+
+	return currentText
+}
+
+func (e *conversationTextExtractor) applyPatchOp(op map[string]any, currentText, historyText string) string {
+	switch str(op["o"]) {
+	case "append":
+		return currentText + str(op["v"])
+	case "replace":
+		return stripHistory(str(op["v"]), historyText)
+	}
+	return currentText
+}
+
+func stripHistory(text, historyText string) string {
+	for historyText != "" && strings.HasPrefix(text, historyText) {
+		text = text[len(historyText):]
+	}
+	return text
+}
+
+func assistantHistoryText(messages []map[string]any) string {
+	var b strings.Builder
+	for _, m := range messages {
+		if str(m["role"]) != "assistant" {
+			continue
+		}
+		b.WriteString(messageContentText(m["content"]))
+	}
+	return b.String()
+}
+
+func messageContentText(content any) string {
+	switch v := content.(type) {
+	case string:
+		return v
+	case []any:
+		var b strings.Builder
+		for _, item := range v {
+			switch p := item.(type) {
+			case string:
+				b.WriteString(p)
+			case map[string]any:
+				if str(p["type"]) == "text" {
+					b.WriteString(str(p["text"]))
 				}
 			}
 		}
-		return sanitizeText(b.String())
+		return b.String()
 	}
-	return ""
+	return str(content)
+}
+
+// extractTextDelta is a stateless convenience wrapper around
+// conversationTextExtractor for callers and tests that do not need history.
+func extractTextDelta(payload []byte) string {
+	return newConversationTextExtractor("").extract(payload)
 }
 
 func imageModelSettings(model string) (upstream, effort string) {
