@@ -2,7 +2,9 @@ package main
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -12,6 +14,7 @@ import (
 	_ "image/png"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -161,10 +164,51 @@ func (c *chatgptClient) baseHeaders(path string, extra map[string]string) map[st
 	return h
 }
 
+const modelsCacheTTL = 5 * time.Minute
+
+type modelsCacheEntry struct {
+	models []map[string]any
+	at     time.Time
+}
+
+var (
+	modelsCacheMu sync.RWMutex
+	modelsCache   = map[string]*modelsCacheEntry{}
+)
+
+func modelsCacheKey(accessToken string) string {
+	h := sha256.Sum256([]byte(accessToken))
+	return hex.EncodeToString(h[:])
+}
+
+func getModelsCache(key string) ([]map[string]any, bool) {
+	modelsCacheMu.RLock()
+	defer modelsCacheMu.RUnlock()
+	entry, ok := modelsCache[key]
+	if !ok || time.Since(entry.at) > modelsCacheTTL {
+		return nil, false
+	}
+	out := make([]map[string]any, len(entry.models))
+	copy(out, entry.models)
+	return out, true
+}
+
+func setModelsCache(key string, models []map[string]any) {
+	out := make([]map[string]any, len(models))
+	copy(out, models)
+	modelsCacheMu.Lock()
+	defer modelsCacheMu.Unlock()
+	modelsCache[key] = &modelsCacheEntry{models: out, at: time.Now()}
+}
+
 // listOfficialModels fetches ChatGPT website model slugs (backend-api/models), same as openai_backend_api.list_models.
 func (c *chatgptClient) listOfficialModels() ([]map[string]any, error) {
 	if err := c.bootstrap(); err != nil {
 		return nil, err
+	}
+	cacheKey := modelsCacheKey(c.accessToken)
+	if cached, ok := getModelsCache(cacheKey); ok {
+		return cached, nil
 	}
 	path := "/backend-api/models?history_and_training_disabled=false"
 	if c.accessToken == "" {
@@ -279,6 +323,7 @@ func (c *chatgptClient) listOfficialModels() ([]map[string]any, error) {
 			})
 		}
 	}
+	setModelsCache(cacheKey, out)
 	return out, nil
 }
 
