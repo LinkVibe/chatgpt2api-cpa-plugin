@@ -850,15 +850,13 @@ func (c *chatgptClient) startImageGeneration(prompt, model string, req *chatRequ
 		return nil, fmt.Errorf("image generation failed: no image generated")
 	}
 
-	// Upstream often finishes SSE before file ids are committed; poll when possible.
+	// Upstream often finishes SSE before file ids and signed download URLs are ready.
 	rt := currentRuntimeConfig()
+	urls := make([]string, 0)
+	var dlErrs []string
 	if conversationID != "" {
 		if rt.ImageInitialWaitSecs > 0 {
 			time.Sleep(time.Duration(rt.ImageInitialWaitSecs * float64(time.Second)))
-		}
-		// tasks error check (moderation / failed image_gen)
-		if errMsg := c.checkTasksError(conversationID); errMsg != "" {
-			return nil, fmt.Errorf("image task error: %s", errMsg)
 		}
 		deadline := time.Now().Add(time.Duration(rt.ImagePollTimeoutSecs * float64(time.Second)))
 		interval := time.Duration(rt.ImagePollIntervalSecs * float64(time.Second))
@@ -872,28 +870,32 @@ func (c *chatgptClient) startImageGeneration(prompt, model string, req *chatRequ
 			moreF, moreS := c.pollConversationImageIDs(conversationID)
 			col.addFile(moreF...)
 			col.addSediment(moreS...)
-			if len(col.fileIDs) > 0 || len(col.sedimentIDs) > 0 {
+			urls, dlErrs = c.resolveImageURLs(conversationID, col.fileIDs, col.sedimentIDs)
+			if len(urls) > 0 {
 				if rt.ImageSettleEnabled && rt.ImageSettleWaitSecs > 0 {
 					time.Sleep(time.Duration(rt.ImageSettleWaitSecs * float64(time.Second)))
 					moreF, moreS = c.pollConversationImageIDs(conversationID)
 					col.addFile(moreF...)
 					col.addSediment(moreS...)
+					urls, dlErrs = c.resolveImageURLs(conversationID, col.fileIDs, col.sedimentIDs)
 				}
+				if len(urls) > 0 {
+					break
+				}
+			}
+			if !time.Now().Before(deadline) {
 				break
 			}
 			time.Sleep(interval)
 		}
+	} else {
+		urls, dlErrs = c.resolveImageURLs(conversationID, col.fileIDs, col.sedimentIDs)
 	}
 
-	// Align with openai_backend_api._resolve_image_urls:
-	// file_id  -> /backend-api/files/{id}/download
-	// sediment -> /backend-api/conversation/{cid}/attachment/{id}/download
-	fileIDs, sedimentIDs := col.fileIDs, col.sedimentIDs
-	urls, dlErrs := c.resolveImageURLs(conversationID, fileIDs, sedimentIDs)
 	if len(urls) == 0 {
 		return nil, fmt.Errorf(
 			"no image urls (conversation_id=%q sse_events=%d file_ids=%v sediment_ids=%v dl_errors=%v)",
-			conversationID, col.events, fileIDs, sedimentIDs, dlErrs,
+			conversationID, col.events, col.fileIDs, col.sedimentIDs, dlErrs,
 		)
 	}
 	return urls, nil
@@ -1019,7 +1021,8 @@ func (c *chatgptClient) getFileDownloadURL(fileID string) (string, error) {
 	if u := downloadURLFromJSON(body); u != "" {
 		return u, nil
 	}
-	return "", fmt.Errorf("%s: no download_url in %s", path, truncate(string(body), 160))
+	// The file record exists but the signed download URL may not be ready yet.
+	return "", nil
 }
 
 func (c *chatgptClient) getAttachmentDownloadURL(conversationID, attachmentID string) (string, error) {
@@ -1040,7 +1043,8 @@ func (c *chatgptClient) getAttachmentDownloadURL(conversationID, attachmentID st
 	if u := downloadURLFromJSON(body); u != "" {
 		return u, nil
 	}
-	return "", fmt.Errorf("no attachment download url")
+	// Attachment metadata exists but the signed URL may not be ready yet.
+	return "", nil
 }
 
 func downloadURLFromJSON(body []byte) string {
