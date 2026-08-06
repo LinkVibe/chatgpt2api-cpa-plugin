@@ -1228,16 +1228,25 @@ var (
 	citationTextRe     = regexp.MustCompile(`(?i)cite(?:turn\d+\w*)+|turn\d+search\d+`)
 	privUseCharRe      = regexp.MustCompile(`[\x{e200}\x{e201}\x{e202}]`)
 	spaceBeforePunctRe = regexp.MustCompile(`\s+([.,;:!?])`)
+	bracketedURLRe     = regexp.MustCompile(`\[(?:https?://[^\s\]]+(?:\s+https?://[^\s\]]+)*)\]`)
+	metadataTokenRe    = regexp.MustCompile(`(?i)\b(?:grouped_webpages|search_result_groups|finish_details|can_save|is_complete|stop_tokens|fallback_items|sources_footnote|supporting_websites)\b`)
 )
 
 func sanitizeText(s string) string {
 	s = stripGoMapArtifacts(s)
+	s = stripMetadataTokens(s)
+	s = bracketedURLRe.ReplaceAllString(s, "")
 	s = annotationSpanRe.ReplaceAllString(s, "")
 	s = annotationTailRe.ReplaceAllString(s, "")
 	s = citationTextRe.ReplaceAllString(s, "")
 	s = privUseCharRe.ReplaceAllString(s, "")
 	s = spaceBeforePunctRe.ReplaceAllString(s, "$1")
 	return s
+}
+
+func stripMetadataTokens(s string) string {
+	s = metadataTokenRe.ReplaceAllString(s, "")
+	return strings.ReplaceAll(s, "[]", "")
 }
 
 // stripGoMapArtifacts removes Go fmt.Sprint artifacts like "map[...]" that
@@ -1267,6 +1276,12 @@ func stripGoMapArtifacts(s string) string {
 				if looksLikeMetadataArtifact(inner) {
 					i = j - 1
 					continue
+				}
+			} else {
+				// Unclosed map[...] artifact that runs to the end of the string.
+				// If it looks like internal metadata, drop the rest of the string.
+				if looksLikeMetadataArtifact(string(rs[start:])) {
+					break
 				}
 			}
 		}
