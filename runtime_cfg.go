@@ -9,26 +9,28 @@ import (
 
 // Runtime knobs (plugin config + defaults aligned with chatgpt2api).
 type runtimeConfig struct {
-	ModelPrefix           string
-	ImagePollTimeoutSecs  float64
-	ImagePollIntervalSecs float64
-	ImageInitialWaitSecs  float64
-	ImageSettleEnabled    bool
-	ImageSettleWaitSecs   float64
-	DisableInvalidToken   bool
-	DefaultModel          string
+	ModelPrefix             string
+	ImagePollTimeoutSecs    float64
+	ImagePollIntervalSecs   float64
+	ImageInitialWaitSecs    float64
+	ImageSettleEnabled      bool
+	ImageSettleWaitSecs     float64
+	DisableInvalidToken     bool
+	DefaultModel            string
+	TokenPatrolIntervalSecs float64
 }
 
 var (
 	cfgMu sync.RWMutex
 	cfg   = runtimeConfig{
-		ImagePollTimeoutSecs:  180,
-		ImagePollIntervalSecs: 5,
-		ImageInitialWaitSecs:  8,
-		ImageSettleEnabled:    true,
-		ImageSettleWaitSecs:   2,
-		DisableInvalidToken:   true,
-		DefaultModel:          "gpt-image-2",
+		ImagePollTimeoutSecs:    180,
+		ImagePollIntervalSecs:   5,
+		ImageInitialWaitSecs:    8,
+		ImageSettleEnabled:      true,
+		ImageSettleWaitSecs:     2,
+		DisableInvalidToken:     true,
+		DefaultModel:            "gpt-image-2",
+		TokenPatrolIntervalSecs: 300,
 	}
 )
 
@@ -93,6 +95,9 @@ func applyConfigMap(m map[string]any) {
 	}
 	if s := str(m["default_model"]); s != "" {
 		cfg.DefaultModel = s
+	}
+	if v, ok := toFloat(m["token_patrol_interval_secs"]); ok && v >= 0 {
+		cfg.TokenPatrolIntervalSecs = v
 	}
 }
 

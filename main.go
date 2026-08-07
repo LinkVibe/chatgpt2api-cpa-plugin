@@ -95,6 +95,7 @@ func registration() map[string]any {
 				{"Name": "image_settle_enabled", "Type": "boolean", "Description": "Extra settle poll after first hit."},
 				{"Name": "image_settle_wait_secs", "Type": "number", "Description": "Settle wait seconds."},
 				{"Name": "disable_invalid_token", "Type": "boolean", "Description": "Auto-disable auth file when access_token is invalid."},
+				{"Name": "token_patrol_interval_secs", "Type": "number", "Description": "Seconds between background token validity probes (0 disables patrol)."},
 			},
 		},
 		"capabilities": map[string]any{

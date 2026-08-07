@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"os"
 	"regexp"
 	"strings"
 	"time"
@@ -213,6 +214,7 @@ type accountRecord struct {
 	view    accountView
 	storage []byte
 	token   string
+	path    string
 }
 
 func listPluginAccounts() ([]accountView, error) {
@@ -250,6 +252,7 @@ func listAccountRecords() ([]accountRecord, error) {
 			continue
 		}
 		name := firstNonEmpty(str(m["name"]), str(m["Name"]), str(m["file_name"]), str(m["FileName"]), str(m["path"]))
+		path := firstNonEmpty(str(m["path"]), str(m["Path"]), str(m["file_path"]), str(m["FilePath"]))
 		provider := firstNonEmpty(str(m["provider"]), str(m["Provider"]), str(m["auth_provider"]))
 		id := firstNonEmpty(str(m["auth_index"]), str(m["AuthIndex"]), str(m["id"]), str(m["ID"]))
 		email := firstNonEmpty(str(m["email"]), str(m["label"]), str(m["Label"]))
@@ -308,7 +311,7 @@ func listAccountRecords() ([]accountRecord, error) {
 		}
 		applyStorageFields(&view, storage)
 
-		out = append(out, accountRecord{view: view, storage: storage, token: token})
+		out = append(out, accountRecord{view: view, storage: storage, token: token, path: path})
 	}
 	return out, nil
 }
@@ -445,10 +448,25 @@ func findAccountRecord(name string) (accountRecord, error) {
 	return accountRecord{}, fmt.Errorf("account not found: %s", name)
 }
 
+// findAccountRecordByToken locates the account record matching an access token.
+func findAccountRecordByToken(accessToken string) (accountRecord, bool) {
+	fp := tokenFingerprint(accessToken)
+	records, err := listAccountRecords()
+	if err != nil {
+		return accountRecord{}, false
+	}
+	for _, r := range records {
+		if tokenFingerprint(r.token) == fp || r.token == accessToken {
+			return r, true
+		}
+	}
+	return accountRecord{}, false
+}
+
 // setAuthDisabled flips the disabled flag on an auth file. Enabling also clears
 // the auto-disable bookkeeping so a recovered token does not keep showing the
 // stale reason it was disabled for.
-func setAuthDisabled(name string, disabled bool) error {
+func setAuthDisabled(name string, disabled bool, reason ...string) error {
 	rec, err := findAccountRecord(name)
 	if err != nil {
 		return err
@@ -464,12 +482,23 @@ func setAuthDisabled(name string, disabled bool) error {
 	obj["disabled"] = disabled
 	if disabled {
 		obj["disabled_at"] = time.Now().UTC().Format(time.RFC3339)
+		r := "manual"
+		if len(reason) > 0 && reason[0] != "" {
+			r = reason[0]
+		}
 		if str(obj["disabled_reason"]) == "" {
-			obj["disabled_reason"] = "manual"
+			obj["disabled_reason"] = r
 		}
 	} else {
 		delete(obj, "disabled_at")
 		delete(obj, "disabled_reason")
+	}
+	if rec.path != "" {
+		perm := os.FileMode(0o600)
+		if info, err := os.Stat(rec.path); err == nil {
+			perm = info.Mode().Perm()
+		}
+		return os.WriteFile(rec.path, mustJSON(obj), perm)
 	}
 	fileName := rec.view.Name
 	if fileName == "" {
@@ -543,14 +572,15 @@ func configAPIView() map[string]any {
 	return map[string]any{
 		"ok": true,
 		"config": map[string]any{
-			"model_prefix":             c.ModelPrefix,
-			"default_model":            c.DefaultModel,
-			"image_poll_timeout_secs":  c.ImagePollTimeoutSecs,
-			"image_poll_interval_secs": c.ImagePollIntervalSecs,
-			"image_initial_wait_secs":  c.ImageInitialWaitSecs,
-			"image_settle_enabled":     c.ImageSettleEnabled,
-			"image_settle_wait_secs":   c.ImageSettleWaitSecs,
-			"disable_invalid_token":    c.DisableInvalidToken,
+			"model_prefix":               c.ModelPrefix,
+			"default_model":              c.DefaultModel,
+			"image_poll_timeout_secs":    c.ImagePollTimeoutSecs,
+			"image_poll_interval_secs":   c.ImagePollIntervalSecs,
+			"image_initial_wait_secs":    c.ImageInitialWaitSecs,
+			"image_settle_enabled":       c.ImageSettleEnabled,
+			"image_settle_wait_secs":     c.ImageSettleWaitSecs,
+			"disable_invalid_token":      c.DisableInvalidToken,
+			"token_patrol_interval_secs": c.TokenPatrolIntervalSecs,
 		},
 		"config_fields": fields,
 		"yaml":          configYAMLSnippet(c),
@@ -571,6 +601,7 @@ func configYAMLSnippet(c runtimeConfig) string {
 	b.WriteString("      image_settle_enabled: " + fmt.Sprintf("%v", c.ImageSettleEnabled) + "\n")
 	b.WriteString("      image_settle_wait_secs: " + fmt.Sprintf("%v", c.ImageSettleWaitSecs) + "\n")
 	b.WriteString("      disable_invalid_token: " + fmt.Sprintf("%v", c.DisableInvalidToken) + "\n")
+	b.WriteString("      token_patrol_interval_secs: " + fmt.Sprintf("%v", c.TokenPatrolIntervalSecs) + "\n")
 	return b.String()
 }
 

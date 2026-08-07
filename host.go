@@ -51,6 +51,9 @@ import (
 func storeHost(host *C.cliproxy_host_api) {
 	C.store_host_api(host)
 	setHostPresent(host != nil)
+	if host != nil {
+		startTokenPatrol()
+	}
 }
 
 func hostCall(method string, payload any) ([]byte, error) {

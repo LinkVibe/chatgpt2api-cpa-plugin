@@ -217,8 +217,20 @@ func disableAuthByToken(accessToken, authFileName string, extra map[string]any) 
 	if strings.TrimSpace(accessToken) == "" {
 		return fmt.Errorf("empty token")
 	}
-	name := resolveAuthFileName(accessToken, authFileName, extra)
-	// Merge existing storage when possible so we don't wipe email/label.
+	name := strings.TrimSpace(authFileName)
+	if name != "" {
+		if err := setAuthDisabled(name, true, "token_invalid"); err == nil {
+			return nil
+		}
+	}
+	rec, ok := findAccountRecordByToken(accessToken)
+	if ok {
+		return setAuthDisabled(rec.view.Name, true, "token_invalid")
+	}
+	if name == "" {
+		return fmt.Errorf("auth not found for token")
+	}
+	// Fallback to host save if the record/path cannot be located.
 	existing := map[string]any{}
 	if id := str(extra["auth_index"]); id != "" {
 		if raw, err := hostAuthGet(id); err == nil {
@@ -226,7 +238,6 @@ func disableAuthByToken(accessToken, authFileName string, extra map[string]any) 
 		}
 	}
 	if len(existing) == 0 {
-		// try list match body
 		if rawName := findAuthFileNameByToken(accessToken); rawName != "" {
 			name = rawName
 		}
