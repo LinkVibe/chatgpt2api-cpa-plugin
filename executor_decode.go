@@ -13,18 +13,18 @@ import (
 )
 
 type executorRequest struct {
-	AuthID          string            `json:"AuthID"`
-	AuthProvider    string            `json:"AuthProvider"`
-	Model           string            `json:"Model"`
-	Format          string            `json:"Format"`
-	Stream          bool              `json:"Stream"`
-	OriginalRequest []byte            `json:"OriginalRequest"`
-	Payload         []byte            `json:"Payload"`
-	StorageJSON     []byte            `json:"StorageJSON"`
-	SourceFormat    string            `json:"SourceFormat"`
-	Headers         map[string]string `json:"Headers"`
-	FileName        string            `json:"FileName"`
-	AuthIndex       string            `json:"AuthIndex"`
+	AuthID          string      `json:"AuthID"`
+	AuthProvider    string      `json:"AuthProvider"`
+	Model           string      `json:"Model"`
+	Format          string      `json:"Format"`
+	Stream          bool        `json:"Stream"`
+	OriginalRequest []byte      `json:"OriginalRequest"`
+	Payload         []byte      `json:"Payload"`
+	StorageJSON     []byte      `json:"StorageJSON"`
+	SourceFormat    string      `json:"SourceFormat"`
+	Headers         http.Header `json:"Headers"`
+	FileName        string      `json:"FileName"`
+	AuthIndex       string      `json:"AuthIndex"`
 
 	// StreamID is opened by the host stream bridge for executor.execute_stream.
 	// When present the plugin should emit chunks via host.stream.emit instead of
@@ -104,11 +104,32 @@ func fillExecutorFromMap(req *executorRequest, m map[string]any) {
 	}
 	if req.Headers == nil {
 		if h, ok := m["Headers"].(map[string]any); ok {
-			req.Headers = stringMapFromAny(h)
+			req.Headers = headerFromAny(h)
 		} else if h, ok := m["headers"].(map[string]any); ok {
-			req.Headers = stringMapFromAny(h)
+			req.Headers = headerFromAny(h)
 		}
 	}
+}
+
+func headerFromAny(m map[string]any) http.Header {
+	h := make(http.Header, len(m))
+	for k, v := range m {
+		switch vals := v.(type) {
+		case []any:
+			for _, it := range vals {
+				h.Add(k, str(it))
+			}
+		case []string:
+			for _, it := range vals {
+				h.Add(k, it)
+			}
+		default:
+			if s := str(vals); s != "" {
+				h.Set(k, s)
+			}
+		}
+	}
+	return h
 }
 
 func firstBytes(vals ...any) []byte {
@@ -157,17 +178,8 @@ func requestBodyJSON(req executorRequest) (map[string]any, []byte) {
 	return payload, body
 }
 
-func headerValue(headers map[string]string, key string) string {
-	for k, v := range headers {
-		if strings.EqualFold(k, key) {
-			return v
-		}
-	}
-	return ""
-}
-
 func multipartPayload(req executorRequest, body []byte) map[string]any {
-	ct := headerValue(req.Headers, "Content-Type")
+	ct := req.Headers.Get("Content-Type")
 	mediaType, params, err := mime.ParseMediaType(ct)
 	if err != nil || !strings.HasPrefix(mediaType, "multipart/") {
 		return nil
