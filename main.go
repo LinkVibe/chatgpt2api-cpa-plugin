@@ -596,15 +596,15 @@ func wantsImageGeneration(payload map[string]any) bool {
 
 func extractImageRequest(payload map[string]any) (prompt string, images []string, n int, size, quality string) {
 	n = 1
-	size = str(payload["size"])
-	quality = str(payload["quality"])
-	if strings.TrimSpace(quality) == "" {
+	size = strings.TrimSpace(str(payload["size"]))
+	quality = strings.TrimSpace(str(payload["quality"]))
+	if quality == "" {
 		quality = "auto"
 	}
-	if v, ok := payload["n"].(float64); ok && int(v) > 0 {
+	if v, ok := toFloat(payload["n"]); ok && int(v) > 0 {
 		n = int(v)
 	}
-	prompt = str(payload["prompt"])
+	prompt = strings.TrimSpace(str(payload["prompt"]))
 	if prompt == "" {
 		if msgs, ok := payload["messages"].([]any); ok {
 			for i := len(msgs) - 1; i >= 0; i-- {
@@ -642,14 +642,14 @@ func extractImageRequest(payload map[string]any) (prompt string, images []string
 						}
 					}
 				}
-				if prompt != "" {
+				if prompt = strings.TrimSpace(prompt); prompt != "" {
 					break
 				}
 			}
 		}
 	}
 	if prompt == "" {
-		prompt = str(payload["input"])
+		prompt = extractInputPrompt(payload["input"])
 	}
 	// images field for edits
 	if imgs, ok := payload["images"].([]any); ok {
@@ -671,7 +671,40 @@ func extractImageRequest(payload map[string]any) (prompt string, images []string
 	if img := str(payload["image"]); img != "" {
 		images = append(images, img)
 	}
-	return prompt, images, n, size, quality
+	return strings.TrimSpace(prompt), images, n, size, quality
+}
+
+func extractInputPrompt(input any) string {
+	switch v := input.(type) {
+	case string:
+		return strings.TrimSpace(v)
+	case []any:
+		var b strings.Builder
+		for _, it := range v {
+			m, _ := it.(map[string]any)
+			if m == nil {
+				continue
+			}
+			if str(m["role"]) != "user" && str(m["role"]) != "" {
+				continue
+			}
+			parts, _ := m["content"].([]any)
+			for _, part := range parts {
+				pm, _ := part.(map[string]any)
+				if pm == nil {
+					continue
+				}
+				switch str(pm["type"]) {
+				case "input_text", "text":
+					b.WriteString(str(pm["text"]))
+				case "input_image", "image_url":
+					// images handled separately via image[] references below
+				}
+			}
+		}
+		return strings.TrimSpace(b.String())
+	}
+	return ""
 }
 
 func extractMessages(payload map[string]any) []map[string]any {

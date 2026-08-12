@@ -1,8 +1,14 @@
 package main
 
 import (
+	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"io"
+	"mime"
+	"mime/multipart"
+	"net/http"
 	"strings"
 )
 
@@ -143,9 +149,99 @@ func requestBodyJSON(req executorRequest) (map[string]any, []byte) {
 		_ = json.Unmarshal(body, &payload)
 	}
 	if payload == nil {
+		payload = multipartPayload(req, body)
+	}
+	if payload == nil {
 		payload = map[string]any{}
 	}
 	return payload, body
+}
+
+func headerValue(headers map[string]string, key string) string {
+	for k, v := range headers {
+		if strings.EqualFold(k, key) {
+			return v
+		}
+	}
+	return ""
+}
+
+func multipartPayload(req executorRequest, body []byte) map[string]any {
+	ct := headerValue(req.Headers, "Content-Type")
+	mediaType, params, err := mime.ParseMediaType(ct)
+	if err != nil || !strings.HasPrefix(mediaType, "multipart/") {
+		return nil
+	}
+	boundary := params["boundary"]
+	if boundary == "" {
+		return nil
+	}
+
+	reader := multipart.NewReader(bytes.NewReader(body), boundary)
+	payload := map[string]any{}
+	var images []string
+
+	for {
+		part, err := reader.NextPart()
+		if err == io.EOF {
+			break
+		}
+		if err != nil || part == nil {
+			continue
+		}
+		name := part.FormName()
+		fileName := part.FileName()
+		if name == "" {
+			continue
+		}
+		data, _ := io.ReadAll(part)
+		if len(data) == 0 {
+			continue
+		}
+
+		if fileName != "" || isMultipartFilePart(part, data) {
+			mimeType := part.Header.Get("Content-Type")
+			if mimeType == "" {
+				mimeType = http.DetectContentType(data)
+			}
+			encoded := "data:" + mimeType + ";base64," + base64.StdEncoding.EncodeToString(data)
+			if name == "image" || name == "image[]" || name == "images" {
+				images = append(images, encoded)
+			} else if name == "mask" {
+				payload["mask"] = encoded
+			} else {
+				images = append(images, encoded)
+			}
+			continue
+		}
+		payload[name] = strings.TrimSpace(string(data))
+	}
+
+	if len(images) == 1 {
+		payload["image"] = images[0]
+	} else if len(images) > 1 {
+		arr := make([]any, len(images))
+		for i, v := range images {
+			arr[i] = v
+		}
+		payload["images"] = arr
+	}
+	return payload
+}
+
+func isMultipartFilePart(part *multipart.Part, data []byte) bool {
+	if part.FileName() != "" {
+		return true
+	}
+	ct := part.Header.Get("Content-Type")
+	if ct == "" {
+		return false
+	}
+	mediaType, _, err := mime.ParseMediaType(ct)
+	if err != nil {
+		return false
+	}
+	return strings.HasPrefix(mediaType, "image/") || mediaType == "application/octet-stream"
 }
 
 func resolveModelName(req executorRequest, payload map[string]any) string {
