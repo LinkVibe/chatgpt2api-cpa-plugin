@@ -77,13 +77,18 @@ type imageIDCollector struct {
 	seenSediment map[string]struct{}
 	events       int
 	lastPreview  string
+	skipIDs      map[string]struct{}
 }
 
-func newImageIDCollector() *imageIDCollector {
-	return &imageIDCollector{
+func newImageIDCollector(skip ...map[string]struct{}) *imageIDCollector {
+	c := &imageIDCollector{
 		seenFile:     map[string]struct{}{},
 		seenSediment: map[string]struct{}{},
 	}
+	if len(skip) > 0 {
+		c.skipIDs = skip[0]
+	}
+	return c
 }
 
 func (c *imageIDCollector) addFile(ids ...string) {
@@ -92,6 +97,9 @@ func (c *imageIDCollector) addFile(ids ...string) {
 			continue
 		}
 		if _, ok := c.seenFile[id]; ok {
+			continue
+		}
+		if _, ok := c.skipIDs[id]; ok {
 			continue
 		}
 		c.seenFile[id] = struct{}{}
@@ -105,6 +113,9 @@ func (c *imageIDCollector) addSediment(ids ...string) {
 			continue
 		}
 		if _, ok := c.seenSediment[id]; ok {
+			continue
+		}
+		if _, ok := c.skipIDs[id]; ok {
 			continue
 		}
 		c.seenSediment[id] = struct{}{}

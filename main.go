@@ -1,6 +1,8 @@
 package main
 
 import (
+	"bytes"
+	"compress/gzip"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -303,22 +305,13 @@ func handleExecutorExecute(request []byte, stream bool) ([]byte, error) {
 			format = "openai-image"
 		}
 		if isImageFormat(format) {
-			return okEnvelope(map[string]any{
-				"Payload": mustJSON(result),
-				"Headers": map[string][]string{"Content-Type": {"application/json"}},
-			})
+			return okEnvelope(compressedJSONResponse(mustJSON(result), req.Headers))
 		}
 		if format == "chat-completions" || format == "openai" || format == "responses" || format == "openai-response" {
 			out := wrapImageAsChat(result, model, format)
-			return okEnvelope(map[string]any{
-				"Payload": out,
-				"Headers": map[string][]string{"Content-Type": {"application/json"}},
-			})
+			return okEnvelope(compressedJSONResponse(out, req.Headers))
 		}
-		return okEnvelope(map[string]any{
-			"Payload": mustJSON(result),
-			"Headers": map[string][]string{"Content-Type": {"application/json"}},
-		})
+		return okEnvelope(compressedJSONResponse(mustJSON(result), req.Headers))
 	}
 
 	messages := extractMessages(payload)
@@ -389,10 +382,7 @@ func handleExecutorExecute(request []byte, stream bool) ([]byte, error) {
 		}},
 		"usage": map[string]any{"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
 	}
-	return okEnvelope(map[string]any{
-		"Payload": mustJSON(out),
-		"Headers": map[string][]string{"content-type": {"application/json"}},
-	})
+	return okEnvelope(compressedJSONResponse(mustJSON(out), req.Headers))
 }
 
 // runExecutorStream drives an executor.execute_stream request through the host
@@ -775,4 +765,63 @@ func wrapImageAsChat(result map[string]any, model, format string) []byte {
 			"finish_reason": "stop",
 		}},
 	})
+}
+
+func acceptsGzip(headers http.Header) bool {
+	for _, raw := range headers.Values("Accept-Encoding") {
+		for _, enc := range strings.Split(raw, ",") {
+			enc = strings.TrimSpace(enc)
+			if enc == "" {
+				continue
+			}
+			parts := strings.Split(enc, ";")
+			if strings.ToLower(strings.TrimSpace(parts[0])) == "gzip" {
+				q := "1"
+				if len(parts) > 1 {
+					q = strings.ToLower(strings.TrimSpace(parts[1]))
+				}
+				if !strings.HasPrefix(q, "q=0") {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+func gzipBytes(data []byte) ([]byte, error) {
+	var buf bytes.Buffer
+	w := gzip.NewWriter(&buf)
+	if _, err := w.Write(data); err != nil {
+		_ = w.Close()
+		return nil, err
+	}
+	if err := w.Close(); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
+}
+
+// compressedJSONResponse wraps a JSON payload with optional gzip compression.
+// When the client declares gzip support, the payload is compressed and the
+// Content-Encoding header is set so CPA forwards a compressed response.
+func compressedJSONResponse(payload []byte, headers http.Header) map[string]any {
+	if !acceptsGzip(headers) {
+		return map[string]any{
+			"Payload": payload,
+			"Headers": http.Header{"Content-Type": []string{"application/json"}},
+		}
+	}
+	gzipped, err := gzipBytes(payload)
+	if err != nil {
+		return map[string]any{
+			"Payload": payload,
+			"Headers": http.Header{"Content-Type": []string{"application/json"}},
+		}
+	}
+	h := http.Header{
+		"Content-Type":     []string{"application/json"},
+		"Content-Encoding": []string{"gzip"},
+	}
+	return map[string]any{"Payload": gzipped, "Headers": h}
 }

@@ -717,6 +717,15 @@ func (c *chatgptClient) uploadImage(b64OrDataURL, fileName string) (*uploadedIma
 
 func (c *chatgptClient) startImageGeneration(prompt, model string, req *chatRequirements, conduit string, refs []*uploadedImage) ([]string, error) {
 	upstream, effort := imageModelSettings(model)
+	refSkip := make(map[string]struct{}, len(refs))
+	for _, ref := range refs {
+		if ref == nil {
+			continue
+		}
+		if ref.FileID != "" {
+			refSkip[ref.FileID] = struct{}{}
+		}
+	}
 	parts := make([]any, 0, len(refs)+1)
 	for _, item := range refs {
 		parts = append(parts, map[string]any{
@@ -792,7 +801,7 @@ func (c *chatgptClient) startImageGeneration(prompt, model string, req *chatRequ
 	}
 	path := "/backend-api/f/conversation"
 	raw, _ := json.Marshal(payload)
-	col := newImageIDCollector()
+	col := newImageIDCollector(refSkip)
 	textExtractor := newConversationTextExtractor("")
 	facts := &imageStreamFacts{}
 	var scanner sseLineScanner
@@ -870,14 +879,14 @@ func (c *chatgptClient) startImageGeneration(prompt, model string, req *chatRequ
 			moreF, moreS := c.pollConversationImageIDs(conversationID)
 			col.addFile(moreF...)
 			col.addSediment(moreS...)
-			urls, dlErrs = c.resolveImageURLs(conversationID, col.fileIDs, col.sedimentIDs)
+			urls, dlErrs = c.resolveImageURLs(conversationID, col.fileIDs, col.sedimentIDs, refSkip)
 			if len(urls) > 0 {
 				if rt.ImageSettleEnabled && rt.ImageSettleWaitSecs > 0 {
 					time.Sleep(time.Duration(rt.ImageSettleWaitSecs * float64(time.Second)))
 					moreF, moreS = c.pollConversationImageIDs(conversationID)
 					col.addFile(moreF...)
 					col.addSediment(moreS...)
-					urls, dlErrs = c.resolveImageURLs(conversationID, col.fileIDs, col.sedimentIDs)
+					urls, dlErrs = c.resolveImageURLs(conversationID, col.fileIDs, col.sedimentIDs, refSkip)
 				}
 				if len(urls) > 0 {
 					break
@@ -889,7 +898,7 @@ func (c *chatgptClient) startImageGeneration(prompt, model string, req *chatRequ
 			time.Sleep(interval)
 		}
 	} else {
-		urls, dlErrs = c.resolveImageURLs(conversationID, col.fileIDs, col.sedimentIDs)
+		urls, dlErrs = c.resolveImageURLs(conversationID, col.fileIDs, col.sedimentIDs, refSkip)
 	}
 
 	if len(urls) == 0 {
@@ -980,8 +989,12 @@ func (c *chatgptClient) checkTasksError(conversationID string) string {
 }
 
 // resolveImageURLs mirrors openai_backend_api._resolve_image_urls.
-func (c *chatgptClient) resolveImageURLs(conversationID string, fileIDs, sedimentIDs []string) (urls []string, errs []string) {
+// skip holds uploaded reference image IDs so they are not returned as results.
+func (c *chatgptClient) resolveImageURLs(conversationID string, fileIDs, sedimentIDs []string, skip map[string]struct{}) (urls []string, errs []string) {
 	for _, fileID := range fileIDs {
+		if _, ok := skip[fileID]; ok {
+			continue
+		}
 		u, err := c.getFileDownloadURL(fileID)
 		if err != nil {
 			errs = append(errs, fmt.Sprintf("file %s: %v", fileID, err))
@@ -993,6 +1006,9 @@ func (c *chatgptClient) resolveImageURLs(conversationID string, fileIDs, sedimen
 	}
 	if conversationID != "" {
 		for _, sedimentID := range sedimentIDs {
+			if _, ok := skip[sedimentID]; ok {
+				continue
+			}
 			u, err := c.getAttachmentDownloadURL(conversationID, sedimentID)
 			if err != nil {
 				errs = append(errs, fmt.Sprintf("sediment %s: %v", sedimentID, err))
